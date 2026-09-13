@@ -1,4 +1,6 @@
-# RDR1 Animation Studio 0.8
+![RDR1 Animation Studio](Assets/release-banner.png)
+
+# RDR1 Animation Studio 0.9
 
 Created by **eSaudia — Creator & Project Owner**.
 
