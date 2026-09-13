@@ -1,0 +1,6 @@
+bin/
+obj/
+.vs/
+*.user
+Tools/WasInspector/__pycache__/
+Tools/WasInspector/_deps/

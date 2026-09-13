@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RDR1 Animation Studio 3D Viewer</title>
+  <style>
+    :root { color-scheme: dark; --bg:#11151b; --panel:#1c222b; --text:#ecf1f7; --muted:#9ca9b8; --accent:#d59b46; }
+    * { box-sizing:border-box; }
+    html,body,#viewport { width:100%; height:100%; margin:0; overflow:hidden; background:var(--bg); font:13px "Segoe UI",sans-serif; color:var(--text); }
+    #toolbar { position:absolute; z-index:2; left:12px; right:12px; bottom:12px; display:flex; align-items:center; gap:9px;
+      padding:9px 11px; border:1px solid #394454; border-radius:8px; background:color-mix(in srgb,var(--panel) 94%,transparent); box-shadow:0 5px 24px #0008; }
+    button,select { color:var(--text); background:#2a3340; border:1px solid #465365; border-radius:5px; padding:6px 10px; }
+    button:hover,select:hover { border-color:var(--accent); }
+    #timeline { flex:1; accent-color:var(--accent); }
+    #name { position:absolute; z-index:2; top:12px; left:14px; padding:7px 10px; border-radius:6px; background:#10151dcc; }
+    #help { color:var(--muted); white-space:nowrap; }
+    #loading { position:absolute; inset:0; display:grid; place-items:center; font-size:16px; color:var(--muted); pointer-events:none; }
+  </style>
+  <script type="importmap">
+    {"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}
+  </script>
+  <script>
+    function reportError(text) { document.getElementById('loading').textContent=text; window.chrome?.webview?.postMessage(JSON.stringify({type:'error',message:text})); }
+    addEventListener('error', e => reportError(e.message));
+    addEventListener('unhandledrejection', e => reportError(String(e.reason)));
+  </script>
+</head>
+<body>
+  <div id="viewport"></div>
+  <div id="name">Loading character…</div>
+  <div id="loading">Preparing hardware-accelerated 3D preview…</div>
+  <div id="toolbar">
+    <button id="play">Pause</button>
+    <select id="clips" title="Animation"></select>
+    <input id="timeline" type="range" min="0" max="1" value="0" step="0.001">
+    <span id="time">0.00 / 0.00 s</span>
+    <select id="speed" title="Playback speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option selected value="1">1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+    <button id="reset">Reset view</button>
+    <span id="help">Drag: orbit · Right drag: pan · Wheel: zoom</span>
+  </div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    const params = new URLSearchParams(location.search);
+    const viewport = document.getElementById('viewport');
+    const renderer = new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
+    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+    renderer.setSize(innerWidth,innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.shadowMap.enabled = true;
+    viewport.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(params.get('dark') === '0' ? 0xdfe4ea : 0x11151b);
+    const camera = new THREE.PerspectiveCamera(40,innerWidth/innerHeight,0.01,10000);
+    const controls = new OrbitControls(camera,renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.screenSpacePanning = true;
+    scene.add(new THREE.HemisphereLight(0xffffff,0x28313d,2.2));
+    const key = new THREE.DirectionalLight(0xffffff,2.6); key.position.set(4,-5,7); key.castShadow=true; scene.add(key);
+    const fill = new THREE.DirectionalLight(0xd9e7ff,1.2); fill.position.set(-4,2,3); scene.add(fill);
+    const grid = new THREE.GridHelper(20,40,0x526170,0x29323e); grid.rotation.x=0; scene.add(grid);
+
+    let mixer=null,actions=[],active=null,duration=0,playing=true,home=null;
+    const clock=new THREE.Clock();
+    const timeline=document.getElementById('timeline'), time=document.getElementById('time');
+    const clipSelect=document.getElementById('clips');
+
+    function setAction(index){
+      if(active) active.stop();
+      active=actions[index] || null;
+      duration=active ? active.getClip().duration : 0;
+      timeline.max=Math.max(duration,0.001);
+      if(active){ active.reset().play(); active.paused=!playing; }
+    }
+    function frameObject(object){
+      const box=new THREE.Box3().setFromObject(object), center=box.getCenter(new THREE.Vector3()), size=box.getSize(new THREE.Vector3());
+      const radius=Math.max(size.x,size.y,size.z,1)*0.65;
+      controls.target.copy(center.clone().add(new THREE.Vector3(0,size.y*0.08,0)));
+      camera.position.copy(center).add(new THREE.Vector3(radius*1.55,radius*1.0,radius*2.25));
+      camera.near=Math.max(radius/100,0.01); camera.far=radius*100; camera.updateProjectionMatrix(); controls.update();
+      home={position:camera.position.clone(),target:controls.target.clone()};
+      grid.position.y=box.min.y;
+    }
+
+    new GLTFLoader().load('https://model.local/' + encodeURIComponent(params.get('model')), gltf => {
+      scene.add(gltf.scene);
+      gltf.scene.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+      frameObject(gltf.scene);
+      mixer=new THREE.AnimationMixer(gltf.scene);
+      actions=gltf.animations.map(clip=>mixer.clipAction(clip));
+      gltf.animations.forEach((clip,i)=>{ const option=document.createElement('option'); option.value=i; option.textContent=clip.name || `Animation ${i+1}`; clipSelect.appendChild(option); });
+      setAction(0);
+      document.getElementById('name').textContent=params.get('title') || 'RDR1 character';
+      document.getElementById('loading').style.display='none';
+      let meshes=0; gltf.scene.traverse(o=>{ if(o.isSkinnedMesh) meshes++; });
+      window.previewStats = () => ({time:active?.time, meshes, animations:gltf.animations.length});
+      chrome.webview?.postMessage(JSON.stringify({type:'ready',animations:gltf.animations.length,meshes}));
+    },undefined,error=>{
+      document.getElementById('loading').textContent='Could not load 3D model: '+error.message;
+      chrome.webview?.postMessage(JSON.stringify({type:'error',message:error.message}));
+    });
+
+    document.getElementById('play').onclick=()=>{ playing=!playing; if(active) active.paused=!playing; document.getElementById('play').textContent=playing?'Pause':'Play'; };
+    document.getElementById('speed').onchange=e=>{ if(mixer) mixer.timeScale=Number(e.target.value); };
+    clipSelect.onchange=e=>setAction(Number(e.target.value));
+    timeline.oninput=e=>{ if(mixer&&active){ const t=Number(e.target.value); mixer.setTime(t); } };
+    document.getElementById('reset').onclick=()=>{ if(home){ camera.position.copy(home.position); controls.target.copy(home.target); controls.update(); } };
+    addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+    function animate(){
+      requestAnimationFrame(animate);
+      const delta=Math.min(clock.getDelta(),0.1);
+      if(mixer&&playing) mixer.update(delta);
+      if(active){ const current=((active.time%duration)+duration)%duration; if(!timeline.matches(':active')) timeline.value=current; time.textContent=`${current.toFixed(2)} / ${duration.toFixed(2)} s`; }
+      controls.update(); renderer.render(scene,camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
