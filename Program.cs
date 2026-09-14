@@ -1,5 +1,6 @@
 namespace RDR1AnimationStudio;
 
+using System.Diagnostics;
 using RDR1AnimationStudio.Core;
 
 internal static class Program
@@ -55,6 +56,49 @@ internal static class Program
                 File.WriteAllBytes(args[3], archive.Extract(animationSets[0]));
                 Console.WriteLine($"extracted={args[3]}");
             }
+            return;
+        }
+        if (args.Length >= 2 && args[0] == "--inventory-rpf")
+        {
+            Dictionary<uint, string>? names = args.Length >= 3 ? Rpf6Archive.LoadNames(args[2]) : null;
+            using Rpf6Archive archive = Rpf6Archive.Open(args[1], names);
+            var files = archive.Entries.Where(e => !e.IsDirectory).ToArray();
+            Console.WriteLine($"archive={Path.GetFileName(args[1])} entries={archive.Entries.Count} files={files.Length} encrypted={archive.IsEncrypted}");
+            Console.WriteLine("extensions:");
+            foreach (var group in files.GroupBy(e => Path.GetExtension(e.Name).ToLowerInvariant()).OrderByDescending(g => g.Count()).ThenBy(g => g.Key))
+                Console.WriteLine($"  {(string.IsNullOrEmpty(group.Key) ? "<none>" : group.Key)} count={group.Count()} bytes={group.Sum(e => (long)e.Size)}");
+            Console.WriteLine("resource-types:");
+            foreach (var group in files.GroupBy(e => e.ResourceType).OrderByDescending(g => g.Count()).ThenBy(g => g.Key))
+                Console.WriteLine($"  0x{group.Key:X2} count={group.Count()} bytes={group.Sum(e => (long)e.Size)}");
+            Console.WriteLine("samples:");
+            foreach (Rpf6Archive.Entry entry in files
+                .Where(e => new[] { ".xsc", ".csc", ".ysc", ".scr", ".cam", ".cut", ".cin", ".awc", ".rel", ".xma", ".wav" }
+                    .Contains(Path.GetExtension(e.Name), StringComparer.OrdinalIgnoreCase))
+                .Take(40))
+                Console.WriteLine($"  {entry.Path}|{entry.Size}|resource=0x{entry.ResourceType:X2}|offset=0x{entry.DataOffset:X}");
+            Console.WriteLine("first-files:");
+            foreach (Rpf6Archive.Entry entry in files.Take(20))
+                Console.WriteLine($"  index={entry.Index} {entry.Path}|{entry.Size}|resource=0x{entry.ResourceType:X2}|offset=0x{entry.DataOffset:X}");
+            return;
+        }
+        if (args.Length >= 2 && args[0] == "--decode-resource")
+        {
+            byte[] resource = File.ReadAllBytes(args[1]);
+            string json = ResourceSemantics.DecodeToJson(resource, Path.GetFullPath(args[1]));
+            if (args.Length >= 3) { File.WriteAllText(args[2], json + Environment.NewLine); Console.WriteLine($"decoded={args[2]}"); }
+            else Console.WriteLine(json);
+            return;
+        }
+        if (args.Length >= 4 && args[0] == "--extract-rpf-entry")
+        {
+            Dictionary<uint, string>? names = args.Length >= 5 ? Rpf6Archive.LoadNames(args[4]) : null;
+            using Rpf6Archive archive = Rpf6Archive.Open(args[1], names);
+            if (!int.TryParse(args[2], out int index) || index < 0 || index >= archive.Entries.Count)
+                throw new ArgumentOutOfRangeException(nameof(index));
+            Rpf6Archive.Entry entry = archive.Entries[index];
+            if (entry.IsDirectory) throw new InvalidOperationException("The selected entry is a directory.");
+            File.WriteAllBytes(args[3], archive.Extract(entry));
+            Console.WriteLine($"extracted={entry.Path}|{args[3]}|size={entry.Size}|resource=0x{entry.ResourceType:X2}");
             return;
         }
         if (args.Length >= 2 && args[0] == "--probe-game")

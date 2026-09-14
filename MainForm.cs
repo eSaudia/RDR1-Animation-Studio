@@ -189,6 +189,7 @@ internal sealed class MainForm : Form
                 $"  Audio: {gameLibrary.Audio.Count:N0}\n\n" +
                 "These counts are a safe inventory only; binary mission decoding is not silently substituted.\n\n";
             info.Text = "SCAN REPORT\n\n" + inventory + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
+            var decode = Button("◈ Decode resource semantics…", async (_, _) => await DecodeResourceAsync()); decode.Dock = DockStyle.Bottom; infoPage.Controls.Add(decode);
         }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -196,6 +197,22 @@ internal sealed class MainForm : Form
         }
         else if (page == "Authoring") BuildAuthoringPage();
         Theme();
+    }
+    private async Task DecodeResourceAsync()
+    {
+        using var open = new OpenFileDialog { Title = "Select an extracted RDR1 resource", Filter = "All files|*.*|Cutscene/XML|*.bin;*.xml|RPF resource|*.rpf" };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        using var save = new SaveFileDialog { Title = "Save semantic report", Filter = "JSON report|*.json", FileName = Path.GetFileNameWithoutExtension(open.FileName) + ".semantics.json" };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            byte[] bytes = await File.ReadAllBytesAsync(open.FileName);
+            string json = ResourceSemantics.DecodeToJson(bytes, Path.GetFullPath(open.FileName));
+            await File.WriteAllTextAsync(save.FileName, json + Environment.NewLine);
+            status.Text = "Semantic report written · " + Path.GetFileName(save.FileName);
+            MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.", "Semantic decode complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Could not decode resource:\n" + ex.Message, "Semantic decode", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
     private void BuildAuthoringPage()
     {
