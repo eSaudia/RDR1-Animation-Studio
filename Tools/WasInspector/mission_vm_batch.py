@@ -23,6 +23,8 @@ def main() -> int:
     resources: list[dict[str, Any]] = []
     header_count = 0
     function_count = 0
+    call_reference_count = 0
+    native_usage: dict[str, dict[str, Any]] = {}
     for item in records:
         path = Path(item["file"])
         try:
@@ -33,8 +35,20 @@ def main() -> int:
             headers = disassembly.get("headers", []) if isinstance(disassembly, dict) else []
             valid_headers = [header for header in headers if header.get("valid")]
             functions = disassembly.get("functions", []) if isinstance(disassembly, dict) else []
+            call_references = disassembly.get("callReferences", []) if isinstance(disassembly, dict) else []
+            usage = disassembly.get("nativeUsage", []) if isinstance(disassembly, dict) else []
             header_count += len(valid_headers)
             function_count += len(functions)
+            call_reference_count += len(call_references)
+            for entry in usage:
+                if not isinstance(entry, dict) or not entry.get("hash"):
+                    continue
+                key = str(entry["hash"])
+                total = native_usage.setdefault(key, {"hash": key, "count": 0})
+                total["count"] += int(entry.get("count", 0) or 0)
+                for field in ("nativeIndex", "name"):
+                    if field in entry and field not in total:
+                        total[field] = entry[field]
             resources.append({
                 "name": item.get("name"),
                 "archive": item.get("archive"),
@@ -46,6 +60,8 @@ def main() -> int:
                 "headerCandidates": disassembly.get("headerCandidates", []) if isinstance(disassembly, dict) else [],
                 "headers": valid_headers,
                 "nativeTable": disassembly.get("nativeTable", [])[:4096] if isinstance(disassembly, dict) else [],
+                "nativeUsage": usage[:4096] if isinstance(usage, list) else [],
+                "callReferences": call_references[:4096] if isinstance(call_references, list) else [],
                 "functionCount": len(functions),
                 "identifiers": [entry.get("value") for entry in payload.get("identifiers", [])[:64]] if isinstance(payload, dict) else [],
                 "unresolved": disassembly.get("unresolved", []) if isinstance(disassembly, dict) else payload.get("unresolved", []) if isinstance(payload, dict) else [],
@@ -58,6 +74,8 @@ def main() -> int:
         "resourceCount": len(resources),
         "validHeaderCount": header_count,
         "functionCount": function_count,
+        "callReferenceCount": call_reference_count,
+        "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["hash"])),
         "nativeDatabase": {"path": native_path, "count": len(native_metadata)},
         "resources": resources,
     }

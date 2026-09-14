@@ -45,6 +45,9 @@ def test_vm_resolves_native_table_hashes_without_names():
     assert call["args"]["nativeHash"] == "0x12345678"
     assert call["args"]["parameterCount"] == 1
     assert call["args"]["returnsValue"] is True
+    assert report["nativeUsage"][0]["hash"] == "0x12345678"
+    assert report["nativeUsage"][0]["count"] == 1
+    assert report["functions"][0]["nativeCallCount"] == 1
 
 
 def test_vm_resolves_native_name_from_database(tmp_path):
@@ -86,3 +89,11 @@ def test_native_metadata_adds_signature_to_call(tmp_path):
     args = report["functions"][0]["instructions"][0]["args"]
     assert args["nativeParameterTypes"] == ["Actor", "Vector3*"]
     assert args["nativeReturnType"] == "BOOL"
+
+
+def test_vm_reports_bounded_branch_reference():
+    header = struct.pack(">11I", 0xA8D74300, 0x5000002C, 0x5000002C, 8, 0, 0, 0, 0x8A019D34, 0, 0, 0)
+    payload = header + struct.pack(">I", 0x50000030) + bytes([0x2D, 0, 0, 1, 0x63, 0, 0, 0x2E])
+    report = decode_vm(payload)
+    assert report["functions"][0]["controlFlowEdges"][0]["kind"] == "JumpFalse"
+    assert report["callReferences"][0]["to"] == 55

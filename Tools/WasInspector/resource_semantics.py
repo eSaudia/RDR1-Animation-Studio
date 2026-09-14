@@ -267,10 +267,14 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
             "headerCandidates": header_candidates,
             "headers": headers,
             "functions": [],
+            "nativeUsage": [],
+            "callReferences": [],
             "unresolved": ["resource is not a validated XSC/CSC payload (or the script header is nested/obfuscated)", "native hash/name table", "mission-specific event semantics"]
         }
     candidates = sorted(set(starts or starts_from_headers))
     functions = []
+    native_usage: dict[tuple[int, str | None], dict[str, Any]] = {}
+    call_references: list[dict[str, Any]] = []
     for start in candidates[:256]:
         if start >= len(data):
             continue
@@ -285,7 +289,27 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
                 break
         known = sum(1 for ins in instructions if ins.get("name"))
         if len(instructions) >= 2 and known / len(instructions) >= 0.65:
-            functions.append({"start": start, "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3), "instructions": instructions})
+            native_calls: list[dict[str, Any]] = []
+            control_flow: list[dict[str, Any]] = []
+            for ins in instructions:
+                ins_name = ins.get("name")
+                args = ins.get("args", {})
+                if ins_name == "CallNative" and "nativeHash" in args:
+                    usage_key = (args["nativeIndex"], args["nativeHash"])
+                    usage = native_usage.setdefault(usage_key, {"nativeIndex": args["nativeIndex"], "hash": args["nativeHash"], "count": 0})
+                    usage["count"] += 1
+                    if "nativeName" in args:
+                        usage["name"] = args["nativeName"]
+                    native_calls.append({key: args[key] for key in ("nativeIndex", "nativeHash", "nativeName", "nativeParameterTypes", "nativeReturnType") if key in args})
+                if ins_name in {"Jump", "JumpFalse", "JumpNe", "JumpEq", "JumpLe", "JumpLt", "JumpGe", "JumpGt"} and isinstance(args.get("target"), int):
+                    edge = {"from": ins.get("offset"), "to": args["target"], "kind": ins_name}
+                    control_flow.append(edge)
+                    call_references.append({"function": start, **edge})
+                elif ins_name == "Call2" or (isinstance(ins_name, str) and ins_name.startswith("Call2h")):
+                    if isinstance(args.get("callOffset"), int):
+                        reference = {"function": start, "from": ins.get("offset"), "to": args["callOffset"], "kind": "call2", "callType": args.get("callType", 0)}
+                        call_references.append(reference)
+            functions.append({"start": start, "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3), "nativeCallCount": len(native_calls), "nativeCalls": native_calls, "controlFlowEdges": control_flow, "instructions": instructions})
     native_table = []
     for i, value in enumerate(native_values[:4096]):
         entry: dict[str, Any] = {"index": i, "hash": f"0x{value:08X}"}
@@ -301,7 +325,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
     unresolved = ["script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]
     if not native_names:
         unresolved.insert(0, "native hash/name table")
-    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native hashes resolved when an optional database is supplied; control-flow meaning remains partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": native_table, "functions": functions, "unresolved": unresolved}
+    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native hashes resolved when an optional database is supplied; control-flow edges are bounded references, not a complete decompilation", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": native_table, "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["nativeIndex"])), "callReferences": call_references[:4096], "functions": functions, "unresolved": unresolved}
 
 
 def strings(data: bytes) -> list[dict[str, Any]]:

@@ -135,6 +135,12 @@ When parameter metadata is present, each decoded call additionally reports
 `nativeParameterTypes` and `nativeReturnType`, so a script review can distinguish
 an actor, camera, AI, or audio native from an unknown hash.
 
+Validated VM reports now also include bounded `controlFlowEdges`, `callReferences`,
+per-function `nativeCalls`, and a sorted `nativeUsage` summary. The archive-wide
+index aggregates those usage counts across all mission resources. These are
+evidence links and call-site references; they do not claim that unresolved branch
+or event payload semantics have been fully decompiled.
+
 After a game-folder scan, **Build VM header index…** extracts the identified
 mission resources to a temporary workspace, expands supported RSC/Zstandard
 payloads, and writes one archive-wide `rdr1-mission-vm-index.json`. The temporary
@@ -178,6 +184,6 @@ dotnet build -c Release
 dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
-49 Python tests cover codecs, duplicate identity, timing rejection, import writes,
+51 Python tests cover codecs, duplicate identity, timing rejection, import writes,
 shared-track rejection, and existing decoder behavior. See WAS-ROUNDTRIP.md for the
 earlier encoder research; that document describes version 0.7, not the current UI.
