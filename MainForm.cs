@@ -266,9 +266,13 @@ internal sealed class MainForm : Form
             }
             if (version != previewVersion || IsDisposed) return;
             await preview.LoadModelAsync(model, clip.DisplayName + " · " + selectedCharacter.Label);
-            await preview.Loaded.Task.WaitAsync(TimeSpan.FromSeconds(30), token);
+            // WebView2 can take a while on its first launch, especially while it
+            // initializes the per-user browser cache.  Do not report a healthy
+            // generated model as broken after the old 30-second cutoff.
+            await preview.Loaded.Task.WaitAsync(TimeSpan.FromMinutes(2), token);
             status.Text = "Source name: " + clip.Name + " · " + clip.Set + " · Preview: " + selectedCharacter.Label + " · Mouse drag: orbit, wheel: zoom";
         } catch (OperationCanceledException) { }
+        catch (TimeoutException) { if (version == previewVersion && !IsDisposed) preview.Notice("Preview is still loading. Try selecting the clip again if the character does not appear."); }
         catch (Exception ex) { if (version == previewVersion && !IsDisposed) preview.Notice("Cannot preview this clip on " + selectedCharacter.Label + ".\n" + ex.Message[..Math.Min(ex.Message.Length, 600)]); }
         finally { if (ReferenceEquals(previewOperation, cancellation)) previewOperation = null; }
     }
