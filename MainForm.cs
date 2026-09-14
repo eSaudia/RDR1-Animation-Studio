@@ -195,6 +195,7 @@ internal sealed class MainForm : Form
             var vmIndex = Button("▣ Build VM header index…", async (_, _) => await BuildVmIndexAsync()); vmIndex.Dock = DockStyle.Bottom; infoPage.Controls.Add(vmIndex);
             var importNative = Button("⌘ Import native database…", async (_, _) => await ImportNativeDatabaseAsync()); importNative.Dock = DockStyle.Bottom; infoPage.Controls.Add(importNative);
             var usage = Button("▤ Explore native usage…", async (_, _) => await ExploreNativeUsageAsync()); usage.Dock = DockStyle.Bottom; infoPage.Controls.Add(usage);
+            var scripts = Button("▥ Explore VM scripts…", async (_, _) => await ExploreVmScriptsAsync()); scripts.Dock = DockStyle.Bottom; infoPage.Controls.Add(scripts);
         }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -354,6 +355,53 @@ internal sealed class MainForm : Form
         Color bg = dark ? Color.FromArgb(19, 23, 30) : Color.FromArgb(244, 246, 249), fg = dark ? Color.FromArgb(225, 231, 239) : Color.FromArgb(26, 32, 43);
         dialog.BackColor = bg; dialog.ForeColor = fg;
         foreach (Control child in dialog.Controls) { child.BackColor = child is Button ? (dark ? Color.FromArgb(37, 47, 61) : Color.FromArgb(220, 230, 241)) : bg; child.ForeColor = fg; }
+    }
+    private sealed record VmScriptRow(string Name, string Archive, string InternalPath, int Headers, int Functions, int Calls, string Format);
+    private async Task ExploreVmScriptsAsync()
+    {
+        using var open = new OpenFileDialog { Title = "Open an archive-wide VM index", Filter = "VM index|*.json|All files|*.*", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(open.FileName));
+            if (!document.RootElement.TryGetProperty("resources", out JsonElement entries) || entries.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("This JSON does not contain a mission resource list. Build a VM header index first.");
+            var rows = entries.EnumerateArray().Select(item =>
+            {
+                string GetString(string property, string fallback = "") => item.TryGetProperty(property, out var value) ? value.GetString() ?? fallback : fallback;
+                int GetCount(string property) => item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Array ? value.GetArrayLength() : 0;
+                return new VmScriptRow(GetString("name", "(unnamed)"), GetString("archive"), GetString("internalPath"), GetCount("headers"), item.TryGetProperty("functionCount", out var functions) && functions.TryGetInt32(out int f) ? f : 0, GetCount("callReferences"), GetString("format", "unknown"));
+            }).OrderByDescending(row => row.Functions).ThenBy(row => row.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            using var dialog = new Form { Text = "RDR1 VM Script Explorer", Size = new Size(1180, 660), MinimumSize = new Size(820, 440), StartPosition = FormStartPosition.CenterParent };
+            var filter = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Filter by resource name, archive, or path…", Height = 32, Margin = new Padding(8) };
+            var table = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, RowHeadersVisible = false, AutoGenerateColumns = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, SelectionMode = DataGridViewSelectionMode.FullRowSelect };
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Resource", DataPropertyName = "Name", FillWeight = 25 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Archive", DataPropertyName = "Archive", FillWeight = 20 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Internal path", DataPropertyName = "InternalPath", FillWeight = 30 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Headers", DataPropertyName = "Headers", FillWeight = 8 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Functions", DataPropertyName = "Functions", FillWeight = 9 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Calls", DataPropertyName = "Calls", FillWeight = 8 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Format", DataPropertyName = "Format", FillWeight = 12 });
+            var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 6, 8, 0) };
+            var export = Button("↗ Export CSV…", (_, _) =>
+            {
+                using var save = new SaveFileDialog { Title = "Export VM script inventory", Filter = "CSV file|*.csv", FileName = "rdr1-vm-scripts.csv", AddExtension = true, OverwritePrompt = true };
+                if (save.ShowDialog(dialog) != DialogResult.OK) return;
+                var visible = ((IEnumerable<VmScriptRow>)table.DataSource!).ToList();
+                var csv = new StringBuilder("Resource,Archive,Internal path,Headers,Functions,Calls,Format\r\n");
+                foreach (var row in visible) csv.AppendLine(string.Join(",", Csv(row.Name), Csv(row.Archive), Csv(row.InternalPath), row.Headers, row.Functions, row.Calls, Csv(row.Format)));
+                File.WriteAllText(save.FileName, csv.ToString(), new UTF8Encoding(false)); status.Text = "VM script CSV written · " + Path.GetFileName(save.FileName);
+            });
+            var close = Button("× Close", (_, _) => dialog.Close()); footer.Controls.Add(close); footer.Controls.Add(export);
+            void ApplyFilter()
+            {
+                string query = filter.Text.Trim();
+                table.DataSource = rows.Where(row => query.Length == 0 || row.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || row.Archive.Contains(query, StringComparison.OrdinalIgnoreCase) || row.InternalPath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+            }
+            filter.TextChanged += (_, _) => ApplyFilter(); ApplyFilter();
+            dialog.Controls.Add(table); dialog.Controls.Add(filter); dialog.Controls.Add(footer); ThemeDialog(dialog); dialog.ShowDialog(this);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Could not open VM index:\n" + ex.Message, "VM scripts", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
     private void BuildAuthoringPage()
     {
