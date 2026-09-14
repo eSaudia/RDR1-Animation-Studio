@@ -18,6 +18,7 @@ internal sealed class MainForm : Form
     private readonly DataGridView grid = new() { Dock = DockStyle.Fill, AutoGenerateColumns = false, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, MultiSelect = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect, BorderStyle = BorderStyle.None, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
     private readonly Panel libraryPage = new() { Dock = DockStyle.Fill };
     private readonly Panel packPage = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly Panel scenePage = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly Panel infoPage = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly RichTextBox info = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 12) };
     private readonly RichTextBox packInfo = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 12) };
@@ -65,7 +66,7 @@ internal sealed class MainForm : Form
         authorPreset.Items.AddRange(["Blank authoring pose", "Spider leap (demo)"]); authorPreset.SelectedIndex = 0;
         var nav = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 205, Padding = new Padding(18, 25, 5, 0), FlowDirection = FlowDirection.TopDown, WrapContents = false };
         nav.Controls.Add(new Label { Text = "RDR1\nANIMATION\nSTUDIO", Size = new Size(175, 125), Font = new Font("Segoe UI", 20, FontStyle.Bold) });
-        foreach (var (icon, name) in new[] { ("▦", "Library"), ("✦", "Authoring"), ("◈", "Packs"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
+        foreach (var (icon, name) in new[] { ("▦", "Library"), ("▤", "Scenes"), ("✦", "Authoring"), ("◈", "Packs"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
             var button = Button(icon + "   " + name, (_, _) => ShowPage(name)); button.Size = new Size(172, 48); button.AutoSize = false; button.TextAlign = ContentAlignment.MiddleLeft; nav.Controls.Add(button);
         }
         nav.Controls.Add(new Label { Text = "CREATED BY\neSaudia", Size = new Size(170, 60), Margin = new Padding(4, 80, 0, 0), Font = new Font("Segoe UI", 11, FontStyle.Bold) });
@@ -103,7 +104,8 @@ internal sealed class MainForm : Form
         libraryPage.Controls.Add(split); libraryPage.Controls.Add(filters); libraryPage.Controls.Add(actions);
         infoPage.Controls.Add(info);
         BuildPackPage();
-        body.Controls.Add(libraryPage); body.Controls.Add(packPage); body.Controls.Add(infoPage); body.Controls.Add(summary); body.Controls.Add(top);
+        BuildScenePage();
+        body.Controls.Add(libraryPage); body.Controls.Add(scenePage); body.Controls.Add(packPage); body.Controls.Add(infoPage); body.Controls.Add(summary); body.Controls.Add(top);
         Controls.Add(body); Controls.Add(nav); Controls.Add(status);
         FormClosing += (_, e) => { if (busy) { operation?.Cancel(); e.Cancel = true; status.Text = "Cancelling… close again when stopped."; } };
         Theme();
@@ -173,7 +175,7 @@ internal sealed class MainForm : Form
     }
     private void ShowPage(string page) {
         title.Text = page == "Library" ? "Animation library" : page;
-        libraryPage.Visible = page == "Library"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !packPage.Visible;
+        libraryPage.Visible = page == "Library"; scenePage.Visible = page == "Scenes"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !scenePage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
         if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.10 · Animation Lab\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") info.Text = "SCAN REPORT\n\n" + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
@@ -210,6 +212,60 @@ internal sealed class MainForm : Form
             await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName, "--name", name, "--frames", authorFrames.Value.ToString(), "--fps", authorFps.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "--preset", preset], token);
             status.Text = "Authoring scene created · " + Path.GetFileName(save.FileName);
             if (MessageBox.Show(this, "Authoring scene created. Open it in Blender now?", "Custom authoring", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
+        });
+    }
+    private void BuildScenePage()
+    {
+        var heading = new Label { Dock = DockStyle.Top, Height = 108, Padding = new Padding(0, 4, 0, 0),
+            Text = "SCENE EXPORTER · PROTOTYPE\n\nIntro sequence sample · 00:24 · 30 FPS\nThis timeline is a visual preview of the planned workflow. It uses placeholder scene events, not decoded mission scripts." ,
+            Font = new Font("Segoe UI", 13) };
+        var timeline = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0), BorderStyle = BorderStyle.FixedSingle };
+        timeline.Paint += (_, e) =>
+        {
+            e.Graphics.Clear(dark ? Color.FromArgb(23, 29, 38) : Color.White);
+            Color gridLine = dark ? Color.FromArgb(52, 63, 78) : Color.FromArgb(215, 222, 232);
+            Color textColor = dark ? Color.FromArgb(220, 228, 238) : Color.FromArgb(35, 42, 52);
+            using var pen = new Pen(gridLine); using var brush = new SolidBrush(textColor);
+            int left = 170, top = 48, row = 58, width = Math.Max(1, timeline.ClientSize.Width - left - 20);
+            for (int second = 0; second <= 24; second += 2)
+            {
+                int x = left + (int)(width * second / 24.0); e.Graphics.DrawLine(pen, x, top - 22, x, top + row * 4);
+                e.Graphics.DrawString($"{second:00}s", Font, brush, x - 10, 10);
+            }
+            string[] tracks = ["Camera", "John · actor", "Deputy · actor", "Environment"];
+            foreach (int i in Enumerable.Range(0, tracks.Length))
+            {
+                int y = top + i * row; e.Graphics.DrawString(tracks[i], Font, brush, 12, y + 16); e.Graphics.DrawLine(pen, left, y + row - 1, left + width, y + row - 1);
+            }
+            void Clip(int track, double start, double end, string label, Color color)
+            {
+                int x = left + (int)(width * start / 24.0), y = top + track * row + 9;
+                int w = Math.Max(18, (int)(width * (end - start) / 24.0));
+                using var fill = new SolidBrush(color); e.Graphics.FillRectangle(fill, x, y, w, 38); e.Graphics.DrawString(label, Font, Brushes.White, x + 7, y + 10);
+            }
+            Clip(0, 0, 4, "Establishing shot", Color.FromArgb(83, 126, 164)); Clip(0, 4, 9, "Push-in", Color.FromArgb(83, 126, 164)); Clip(0, 9, 15, "Cutaway", Color.FromArgb(83, 126, 164)); Clip(0, 15, 24, "Wide exit", Color.FromArgb(83, 126, 164));
+            Clip(1, 2, 13, "Walk · gent_wag_psg", Color.FromArgb(40, 143, 126)); Clip(1, 13, 20, "Look around", Color.FromArgb(40, 143, 126));
+            Clip(2, 7, 16, "React · idle", Color.FromArgb(159, 104, 59)); Clip(2, 16, 24, "Gesture", Color.FromArgb(159, 104, 59));
+            Clip(3, 0, 24, "Blackwater street / lighting", Color.FromArgb(102, 91, 135));
+        };
+        var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 82, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
+        var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
+        footer.Controls.Add(export);
+        footer.Controls.Add(new Label { Text = "Export creates a .blend with actor collections, camera markers, timeline events, and supported placeholder actions.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
+        scenePage.Controls.Add(timeline); scenePage.Controls.Add(footer); scenePage.Controls.Add(heading);
+    }
+    private async Task ExportSceneSampleAsync()
+    {
+        if (busy) return;
+        string? exe = Blender(); if (exe is null) return;
+        using var save = new SaveFileDialog { Title = "Save sample scene", Filter = "Blender scene|*.blend", FileName = "RDR1-intro-scene-sample.blend", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_scene_sample.py"), "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName], token);
+            status.Text = "Sample scene exported · " + Path.GetFileName(save.FileName);
+            if (MessageBox.Show(this, "Sample scene exported. Open it in Blender now?", "Scene exporter", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
         });
     }
