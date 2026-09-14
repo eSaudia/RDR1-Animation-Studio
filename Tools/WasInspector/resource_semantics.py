@@ -117,18 +117,47 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
     # never label those bytes as VM instructions without the marker.
     header_candidates = [i for i in range(0, min(len(data), 0x4000) - 3, 4)
                          if data[i:i + 4] in {b"\x00C\xD7\xA8", b"\xA8\xD7C\x00"}]
-    if not header_candidates:
+    headers: list[dict[str, Any]] = []
+    starts_from_headers: list[int] = []
+    for header in header_candidates:
+        if header + 44 > len(data):
+            continue
+        read = lambda pos: int.from_bytes(data[header + pos:header + pos + 4], "big")
+        page_base, page_map, code_blocks, code_length = read(0), read(4), read(8), read(12)
+        parameter_count, statics_count, statics_ptr, signature = read(16), read(20), read(24), read(28)
+        natives_count, natives_ptr = read(32), read(36)
+        code_table = code_blocks & 0x0FFFFFFF
+        valid = code_length > 0 and code_length <= len(data) and signature == 0x8A019D34 and code_table < len(data)
+        block_starts: list[int] = []
+        if valid:
+            block_count = (code_length + 0x3FFF) >> 14
+            for index in range(block_count):
+                pos = code_table + index * 4
+                if pos + 4 > len(data):
+                    valid = False
+                    break
+                target = int.from_bytes(data[pos:pos + 4], "big") & 0x0FFFFFFF
+                if target >= len(data):
+                    valid = False
+                    break
+                block_starts.append(target)
+        record = {"offset": header, "pageBase": f"0x{page_base:08X}", "codeLength": code_length, "parameterCount": parameter_count, "staticsCount": statics_count, "nativesCount": natives_count, "signature": f"0x{signature:08X}", "codeBlocksOffset": code_table, "staticsOffset": statics_ptr & 0x0FFFFFFF, "nativesOffset": natives_ptr & 0x0FFFFFFF, "codeBlockStarts": block_starts, "valid": valid}
+        headers.append(record)
+        if valid:
+            starts_from_headers.extend(block_starts)
+    if not headers or not any(item["valid"] for item in headers):
         return {
             "format": "RDR VM evidence",
             "confidence": "no validated RDR script header found; pointer/opcode bytes are not disassembled",
             "imageBase": "0x50000000",
             "pointerCount": len(pointers),
             "pointers": pointers[:1024],
-            "headerCandidates": [],
+            "headerCandidates": header_candidates,
+            "headers": headers,
             "functions": [],
             "unresolved": ["resource is not a validated XSC/CSC payload (or the script header is nested/obfuscated)", "native hash/name table", "mission-specific event semantics"]
         }
-    candidates = sorted(set(starts or [p["target"] for p in pointers if p["target"] > header_candidates[0]]))
+    candidates = sorted(set(starts or starts_from_headers))
     functions = []
     for start in candidates[:256]:
         if start >= len(data):
@@ -145,7 +174,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
         known = sum(1 for ins in instructions if ins.get("name"))
         if len(instructions) >= 2 and known / len(instructions) >= 0.65:
             functions.append({"start": start, "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3), "instructions": instructions})
-    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; control-flow and native meaning remain partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "functions": functions, "unresolved": ["native hash/name table", "script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]}
+    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; control-flow and native meaning remain partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "functions": functions, "unresolved": ["native hash/name table", "script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]}
 
 
 def strings(data: bytes) -> list[dict[str, Any]]:

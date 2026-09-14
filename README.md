@@ -129,7 +129,8 @@ mission payloads also include candidate image-base pointers and a raw word-opcod
 histogram for reverse-engineering comparison. When a payload contains the
 validated RDR script header, the report adds a bounded VM disassembly: opcode byte,
 instruction offset, raw bytes, validated argument width, and control-flow target
-where the format is known. The opcode names and size rules are cross-checked
+where the format is known. It also records the header signature, code length,
+native/static counts, relative-pointer fields, and code-block starts. The opcode names and size rules are cross-checked
 against the public RDR backend in [RASM](https://github.com/NativeFunction/RASM).
 Generic RSC objects are deliberately not disassembled merely because they contain
 relative pointers; they remain evidence-only until a script header is found. RSC

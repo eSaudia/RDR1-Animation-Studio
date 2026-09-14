@@ -1,3 +1,5 @@
+import struct
+
 from resource_semantics import decode, decode_vm
 
 
@@ -24,9 +26,11 @@ def test_zstd_without_expansion_is_identified():
 
 
 def test_vm_requires_script_header_and_decodes_validated_sizes():
-    # RDR header marker + Function (0x2D, 4 bytes) + Return (0x2E, 3 bytes).
-    payload = b"\x00C\xD7\xA8" + b"\0" * 4 + bytes([0x2D, 1, 0, 2, 0x2E, 0, 1, 0x8B])
-    report = decode_vm(payload, starts=[8])
+    # RDR header + one code-block pointer + Function (0x2D, 4 bytes) + Return.
+    header = struct.pack(">11I", 0xA8D74300, 0x5000002C, 0x5000002C, 7, 1, 0, 0, 0x8A019D34, 0, 0, 0)
+    payload = header + struct.pack(">I", 0x50000030) + bytes([0x2D, 1, 0, 2, 0x2E, 0, 1, 0x8B])
+    report = decode_vm(payload)
     assert report["headerCandidates"] == [0]
+    assert report["headers"][0]["valid"] is True
     assert report["functions"][0]["instructions"][0]["name"] == "Function"
     assert report["functions"][0]["instructions"][0]["bytes"] == "2d010002"
