@@ -218,7 +218,7 @@ internal sealed class MainForm : Form
     private void BuildScenePage()
     {
         var heading = new Label { Dock = DockStyle.Top, Height = 108, Padding = new Padding(0, 4, 0, 0),
-            Text = "SCENE EXPORTER · PROTOTYPE\n\nIntro sequence sample · 00:24 · 30 FPS\nThis timeline is a visual preview of the planned workflow. It uses placeholder scene events, not decoded mission scripts." ,
+            Text = "SCENE EXPORTER · PROTOTYPE\n\nIntro sequence sample · 00:24 · 30 FPS\nThe sample preserves the bundled rig's authored walk action and adds blocking roots. Mission scripts, cameras, props and AI are not decoded yet." ,
             Font = new Font("Segoe UI", 13) };
         var timeline = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0), BorderStyle = BorderStyle.FixedSingle };
         timeline.Paint += (_, e) =>
@@ -252,7 +252,7 @@ internal sealed class MainForm : Form
         var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 82, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
         var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
         footer.Controls.Add(export);
-        footer.Controls.Add(new Label { Text = "Export creates a .blend with actor collections, camera markers, timeline events, and supported placeholder actions.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
+        footer.Controls.Add(new Label { Text = "Export creates a .blend with visible actor collections, a moving authored walk action, camera markers and timeline events.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
         scenePage.Controls.Add(timeline); scenePage.Controls.Add(footer); scenePage.Controls.Add(heading);
     }
     private async Task ExportSceneSampleAsync()
