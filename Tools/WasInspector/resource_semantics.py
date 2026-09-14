@@ -9,6 +9,7 @@ fully documented; unknown values are therefore never guessed.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 import struct
@@ -116,7 +117,19 @@ def decode(data: bytes) -> dict[str, Any]:
         return decode_rbf0(data)
     if data[:4] in RSC_MAGICS:
         version = struct.unpack_from("<I", data, 4)[0] if len(data) >= 8 else None
-        return {"format": "RSC", "confidence": "verified RSC wrapper", "magic": data[:4].decode("latin1"), "version": version, "actualSize": len(data), "unresolved": ["payload compression/resource graph not decoded"]}
+        report: dict[str, Any] = {"format": "RSC", "confidence": "verified RSC wrapper", "magic": data[:4].decode("latin1"), "version": version, "actualSize": len(data)}
+        if zstandard is not None:
+            try:
+                payload = data[12 if data[:4] in {b"RSC\x05", b"RSC\x06"} else 16:]
+                with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(payload)) as reader:
+                    expanded = reader.read()
+                report["expandedSize"] = len(expanded)
+                report["payload"] = decode(expanded)
+                return report
+            except Exception as exc:
+                report["decompressionError"] = str(exc)
+        report["unresolved"] = ["payload compression/resource graph not decoded; install zstandard for RSC05/RSC85 expansion"]
+        return report
     if data.lstrip().startswith(b"<?xml") or data.lstrip().startswith(b"<default"):
         return decode_xml(data)
     if data.startswith(b"\x28\xb5\x2f\xfd"):
@@ -126,7 +139,14 @@ def decode(data: bytes) -> dict[str, Any]:
         result = decode(expanded)
         result["compression"] = {"format": "Zstandard", "compressedSize": len(data), "expandedSize": len(expanded)}
         return result
-    return {"format": "raw", "confidence": "verified byte stream only", "size": len(data), "strings": strings(data), "unresolved": ["resource type/layout is not recognized"]}
+    found = strings(data)
+    identifiers = [item for item in found if re.fullmatch(r"[A-Za-z][A-Za-z0-9_:.]{2,}", item["value"])]
+    return {
+        "format": "raw", "confidence": "verified byte stream and printable identifiers only", "size": len(data),
+        "strings": found, "semanticCounts": {"identifiers": len(identifiers), "animationIdentifiers": sum("_" in item["value"] and any(item["value"].lower().startswith(prefix) for prefix in ("air_", "grd_", "gent_", "gped_", "zomb_")) for item in identifiers)},
+        "identifiers": identifiers,
+        "unresolved": ["mission VM opcode semantics and typed arguments require an independently validated opcode table"]
+    }
 
 
 def main() -> int:
