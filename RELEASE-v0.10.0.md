@@ -7,6 +7,7 @@
 - A game-folder scan now exposes discovered `.wft` character models by name.
 - WFT geometry is decoded on demand, cached under `%LocalAppData%\\RDR1AnimationStudio\\Characters`, merged with the selected animation, and converted to a self-contained GLB for the in-app viewer.
 - Invalid, incompatible, or unsupported resources fail with an explanation instead of falling back to dots or a different character.
+- Python discovery accepts normal Windows PATH installs and version output on either stdout or stderr.
 
 ## Scope
 
