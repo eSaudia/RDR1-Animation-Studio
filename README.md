@@ -112,6 +112,24 @@ and decoded catalog under `%LOCALAPPDATA%\RDR1AnimationStudio\Cache`. Selecting 
 same unchanged game folder again reuses those results; changing an RPF automatically
 invalidates the affected cache.
 
+### Resource semantics (research milestone)
+
+The Scan report includes **Decode resource semantics…** and the command-line
+equivalent below. It produces a portable `.semantics.json` evidence report:
+
+```powershell
+RDR1AnimationStudio.exe --decode-resource extracted-resource.bin report.semantics.json
+```
+
+Validated `camera.rpf` entries that contain XML are decoded into typed elements
+and attributes (booleans, integers, floats, references). Validated `RBF0`
+cutscene resources are indexed by class, object type, camera/actor/prop/audio/
+effect/subtitle labels, event-record count, and source byte offset. RSC wrappers,
+Zstandard frames, and unknown streams are identified without pretending their
+payload has been decoded. Mission VM opcodes, event timing payloads, camera
+transform records, AI task arguments, and audio-bank codecs remain explicitly
+marked unresolved until their layouts are independently validated.
+
 ## Requirements / build
 
 Windows x64, .NET 10 Desktop Runtime (or SDK), Python 3.12 x64, and Blender. A Python 3.12
