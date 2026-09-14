@@ -241,7 +241,9 @@ internal sealed class MainForm : Form
             preview.Notice("Preparing " + selectedCharacter.Label + "…\nFirst preview requires Blender conversion; repeat previews are cached.");
             string assets = Path.Combine(AppContext.BaseDirectory, "Assets");
             string characterKey = selectedCharacter.Asset is null ? "john-bundled" : selectedCharacter.Asset.ArchivePath + "|" + selectedCharacter.Asset.InternalPath + "|" + selectedCharacter.Asset.EntryIndex;
-            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("v010-character|" + characterKey + "|" + clip.Identity + "|" + clip.Fingerprint)));
+            // Bump the cache namespace after fixing armature export; existing v0.10
+            // previews may contain mesh-only GLBs and must be regenerated.
+            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("v010.1-character|" + characterKey + "|" + clip.Identity + "|" + clip.Fingerprint)));
             string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Preview", key);
             Directory.CreateDirectory(folder); string model = Path.Combine(folder, "preview.glb");
             if (!File.Exists(model)) {
