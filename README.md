@@ -134,6 +134,10 @@ JSON once and the app stores it at `%LOCALAPPDATA%\RDR1AnimationStudio\natives.j
 When parameter metadata is present, each decoded call additionally reports
 `nativeParameterTypes` and `nativeReturnType`, so a script review can distinguish
 an actor, camera, AI, or audio native from an unknown hash.
+The decoder compares the encoded VM parameter/return flags with that metadata and
+marks each call `signatureStatus: match|mismatch`; mismatches are counted in both
+the resource report and the archive-wide index. This is a consistency check, not
+a claim that the database or script is authoritative.
 
 Validated VM reports now also include bounded `controlFlowEdges`, `callReferences`,
 per-function `nativeCalls`, and a sorted `nativeUsage` summary. The archive-wide
@@ -193,6 +197,6 @@ dotnet build -c Release
 dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
-51 Python tests cover codecs, duplicate identity, timing rejection, import writes,
+52 Python tests cover codecs, duplicate identity, timing rejection, import writes,
 shared-track rejection, and existing decoder behavior. See WAS-ROUNDTRIP.md for the
 earlier encoder research; that document describes version 0.7, not the current UI.

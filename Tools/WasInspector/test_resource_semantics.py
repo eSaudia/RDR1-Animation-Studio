@@ -89,6 +89,8 @@ def test_native_metadata_adds_signature_to_call(tmp_path):
     args = report["functions"][0]["instructions"][0]["args"]
     assert args["nativeParameterTypes"] == ["Actor", "Vector3*"]
     assert args["nativeReturnType"] == "BOOL"
+    assert args["signatureStatus"] == "mismatch"
+    assert report["signatureMismatchCount"] == 1
 
 
 def test_vm_reports_bounded_branch_reference():

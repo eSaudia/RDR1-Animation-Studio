@@ -24,6 +24,7 @@ def main() -> int:
     header_count = 0
     function_count = 0
     call_reference_count = 0
+    signature_mismatch_count = 0
     native_usage: dict[str, dict[str, Any]] = {}
     for item in records:
         path = Path(item["file"])
@@ -40,12 +41,14 @@ def main() -> int:
             header_count += len(valid_headers)
             function_count += len(functions)
             call_reference_count += len(call_references)
+            signature_mismatch_count += int(disassembly.get("signatureMismatchCount", 0) or 0) if isinstance(disassembly, dict) else 0
             for entry in usage:
                 if not isinstance(entry, dict) or not entry.get("hash"):
                     continue
                 key = str(entry["hash"])
                 total = native_usage.setdefault(key, {"hash": key, "count": 0})
                 total["count"] += int(entry.get("count", 0) or 0)
+                total["signatureMismatches"] = total.get("signatureMismatches", 0) + int(entry.get("signatureMismatches", 0) or 0)
                 for field in ("nativeIndex", "name"):
                     if field in entry and field not in total:
                         total[field] = entry[field]
@@ -62,6 +65,7 @@ def main() -> int:
                 "nativeTable": disassembly.get("nativeTable", [])[:4096] if isinstance(disassembly, dict) else [],
                 "nativeUsage": usage[:4096] if isinstance(usage, list) else [],
                 "callReferences": call_references[:4096] if isinstance(call_references, list) else [],
+                "signatureMismatchCount": disassembly.get("signatureMismatchCount", 0) if isinstance(disassembly, dict) else 0,
                 "functionCount": len(functions),
                 "identifiers": [entry.get("value") for entry in payload.get("identifiers", [])[:64]] if isinstance(payload, dict) else [],
                 "unresolved": disassembly.get("unresolved", []) if isinstance(disassembly, dict) else payload.get("unresolved", []) if isinstance(payload, dict) else [],
@@ -75,6 +79,7 @@ def main() -> int:
         "validHeaderCount": header_count,
         "functionCount": function_count,
         "callReferenceCount": call_reference_count,
+        "signatureMismatchCount": signature_mismatch_count,
         "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["hash"])),
         "nativeDatabase": {"path": native_path, "count": len(native_metadata)},
         "resources": resources,

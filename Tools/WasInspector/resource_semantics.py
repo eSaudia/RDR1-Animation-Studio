@@ -177,6 +177,15 @@ def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None =
                             args["nativeParameterTypes"] = metadata["parameterTypes"]
                         if metadata.get("returnType"):
                             args["nativeReturnType"] = metadata["returnType"]
+                        expected_parameters = metadata.get("parameterTypes")
+                        expected_return = metadata.get("returnType")
+                        if expected_parameters:
+                            args["signatureExpectedParameters"] = len(expected_parameters)
+                        if expected_return:
+                            args["signatureExpectedReturnsValue"] = expected_return.lower() not in {"void", "none"}
+                        parameter_match = not expected_parameters or len(expected_parameters) == args["parameterCount"]
+                        return_match = not expected_return or (expected_return.lower() in {"void", "none"}) == (not args["returnsValue"])
+                        args["signatureStatus"] = "match" if parameter_match and return_match else "mismatch"
             elif name == "Call2" or name.startswith("Call2h"):
                 call_type = 0 if name == "Call2" else int(name[-1], 16)
                 args["callType"] = call_type
@@ -275,6 +284,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
     functions = []
     native_usage: dict[tuple[int, str | None], dict[str, Any]] = {}
     call_references: list[dict[str, Any]] = []
+    signature_mismatches = 0
     for start in candidates[:256]:
         if start >= len(data):
             continue
@@ -298,9 +308,12 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
                     usage_key = (args["nativeIndex"], args["nativeHash"])
                     usage = native_usage.setdefault(usage_key, {"nativeIndex": args["nativeIndex"], "hash": args["nativeHash"], "count": 0})
                     usage["count"] += 1
+                    if args.get("signatureStatus") == "mismatch":
+                        usage["signatureMismatches"] = usage.get("signatureMismatches", 0) + 1
+                        signature_mismatches += 1
                     if "nativeName" in args:
                         usage["name"] = args["nativeName"]
-                    native_calls.append({key: args[key] for key in ("nativeIndex", "nativeHash", "nativeName", "nativeParameterTypes", "nativeReturnType") if key in args})
+                    native_calls.append({key: args[key] for key in ("nativeIndex", "nativeHash", "nativeName", "nativeParameterTypes", "nativeReturnType", "signatureStatus", "signatureExpectedParameters", "signatureExpectedReturnsValue") if key in args})
                 if ins_name in {"Jump", "JumpFalse", "JumpNe", "JumpEq", "JumpLe", "JumpLt", "JumpGe", "JumpGt"} and isinstance(args.get("target"), int):
                     edge = {"from": ins.get("offset"), "to": args["target"], "kind": ins_name}
                     control_flow.append(edge)
@@ -325,7 +338,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
     unresolved = ["script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]
     if not native_names:
         unresolved.insert(0, "native hash/name table")
-    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native hashes resolved when an optional database is supplied; control-flow edges are bounded references, not a complete decompilation", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": native_table, "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["nativeIndex"])), "callReferences": call_references[:4096], "functions": functions, "unresolved": unresolved}
+    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native hashes resolved when an optional database is supplied; signature checks are evidence-only; control-flow edges are bounded references, not a complete decompilation", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": native_table, "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["nativeIndex"])), "signatureMismatchCount": signature_mismatches, "callReferences": call_references[:4096], "functions": functions, "unresolved": unresolved}
 
 
 def strings(data: bytes) -> list[dict[str, Any]]:
