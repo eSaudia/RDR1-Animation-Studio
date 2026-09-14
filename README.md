@@ -1,6 +1,6 @@
 ![RDR1 Animation Studio](Assets/release-banner.png)
 
-# RDR1 Animation Studio 0.10 · Animation Lab
+# RDR1 Animation Studio 0.11 · Animation Lab
 
 Created by **eSaudia — Creator & Project Owner**.
 
@@ -34,6 +34,8 @@ demo below shows the exported animation workflow and playback timing.
 - Decode WFT character geometry into a cached, skinned glTF preview without writing to RPF archives.
 - Preserve source IDs and validation metadata for experimental Blender round trips.
 - Provide a dark/light theme and a report when a clip layout is unsupported.
+- Create custom Blender authoring scenes, including a Spider leap demo preset.
+- Package selected supported clips into a portable, deduplicated animation pack with a validated manifest.
 
 ## Library
 
@@ -48,7 +50,7 @@ Each clip is identified by its source and record offset. Identical names are not
 treated as evidence of identical motion. **Hide identical motion** uses decoded-track
 fingerprints; unrecognized layouts remain visible with an explanation in Scan report.
 
-The interface has Library, Import, Scan report, and About sections, custom drawn icons,
+The interface has Library, Authoring, Packs, Import, Scan report, and About sections, custom drawn icons,
 and a top-right Theme switch. Dark is the default. The old renderer and filename-database
 control have been removed. Filename resolution runs automatically internally.
 
@@ -89,6 +91,18 @@ ordinary root channels are preserved. This is not general retargeting or FBX imp
 The result is decoded and compared with imported samples. An unchanged Blender round
 trip and a small root-motion edit were verified using a real WAS sample. In-game loader
 acceptance has not been tested. RPF archives are never written automatically.
+
+## Custom authoring and packs
+
+The **Authoring** section creates a Blender scene from the bundled 119-bone human rig.
+Choose an action name, frame count, FPS, and either a blank pose or the **Spider leap**
+demo preset. Edit the Action in Blender and save the `.blend` file.
+
+The **Packs** section creates a portable folder from selected supported Library clips.
+It stores each source WAS once under `sources/`, writes exact record offsets and timing
+to `manifest.json`, and provides a validator. Packs are staged for a future ScriptHookRDR
+runtime menu; a loose JSON/WAS folder is not loaded by the game, and no game archive is
+overwritten automatically.
 
 ## Requirements / build
 
