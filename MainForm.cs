@@ -200,7 +200,7 @@ internal sealed class MainForm : Form
     }
     private async Task DecodeResourceAsync()
     {
-        using var open = new OpenFileDialog { Title = "Select an extracted RDR1 resource", Filter = "All files|*.*|Cutscene/XML|*.bin;*.xml|RPF resource|*.rpf" };
+        using var open = new OpenFileDialog { Title = "Select an extracted RDR1 resource", Filter = "All files|*.*|Cutscene/XML|*.bin;*.xml" };
         if (open.ShowDialog(this) != DialogResult.OK) return;
         using var save = new SaveFileDialog { Title = "Save semantic report", Filter = "JSON report|*.json", FileName = Path.GetFileNameWithoutExtension(open.FileName) + ".semantics.json" };
         if (save.ShowDialog(this) != DialogResult.OK) return;
