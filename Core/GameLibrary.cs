@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace RDR1AnimationStudio.Core;
 
@@ -42,10 +45,13 @@ internal sealed class GameLibrary
         string root = Path.GetFullPath(gameDirectory);
         string[] archivePaths = Directory.EnumerateFiles(root, "*.rpf", SearchOption.AllDirectories)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        var cachedArchives = LoadArchiveCache(root, names.Count);
         var animationSets = new ConcurrentBag<GameAsset>();
         var characters = new ConcurrentBag<GameAsset>();
         var errors = new ConcurrentBag<string>();
+        var archiveResults = new ConcurrentDictionary<string, ArchiveCache>(StringComparer.OrdinalIgnoreCase);
         int completed = 0;
+        int cached = 0;
 
         Parallel.ForEach(archivePaths, new ParallelOptions {
             CancellationToken = cancellationToken,
@@ -54,7 +60,23 @@ internal sealed class GameLibrary
         {
             try
             {
+                FileInfo info = new(archivePath);
+                if (cachedArchives.TryGetValue(archivePath, out ArchiveCache? saved) &&
+                    saved.Length == info.Length && saved.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks)
+                {
+                    foreach (GameAsset asset in saved.Assets)
+                    {
+                        if (asset.Kind == GameAssetKind.AnimationSet) animationSets.Add(asset);
+                        else characters.Add(asset);
+                    }
+                    foreach (string error in saved.Errors) errors.Add(error);
+                    archiveResults[archivePath] = saved;
+                    Interlocked.Increment(ref cached);
+                }
+                else
+                {
                 using Rpf6Archive archive = Rpf6Archive.Open(archivePath, names);
+                var found = new List<GameAsset>();
                 foreach (Rpf6Archive.Entry entry in archive.Entries)
                 {
                     if (entry.IsDirectory) continue;
@@ -63,17 +85,28 @@ internal sealed class GameLibrary
                         kind = GameAssetKind.AnimationSet;
                     if (kind is null) continue;
                     var asset = new GameAsset(kind.Value, entry.Name, archivePath, entry.Path, entry.Index, entry.Size);
+                    found.Add(asset);
                     if (kind == GameAssetKind.AnimationSet) animationSets.Add(asset);
                     else characters.Add(asset);
+                }
+                archiveResults[archivePath] = new ArchiveCache(archivePath, info.Length, info.LastWriteTimeUtc.Ticks, found, []);
                 }
             }
             catch (Exception ex)
             {
                 errors.Add($"{archivePath}: {ex.Message}");
+                try
+                {
+                    FileInfo info = new(archivePath);
+                    archiveResults[archivePath] = new ArchiveCache(archivePath, info.Length, info.LastWriteTimeUtc.Ticks, [], [$"{archivePath}: {ex.Message}"]);
+                }
+                catch { }
             }
             int count = Interlocked.Increment(ref completed);
-            progress?.Report($"Indexing game archives… {count:N0}/{archivePaths.Length:N0}");
+            progress?.Report($"Scanning game archives… {count:N0}/{archivePaths.Length:N0} ({cached:N0} cached)");
         });
+
+        SaveArchiveCache(root, names.Count, archiveResults.Values);
 
         return new GameLibrary {
             GameDirectory = root,
@@ -82,6 +115,51 @@ internal sealed class GameLibrary
             Characters = characters.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
             Errors = errors.Order().ToArray()
         };
+    }
+
+    private sealed record ArchiveCache(
+        string Path,
+        long Length,
+        long LastWriteUtcTicks,
+        List<GameAsset> Assets,
+        List<string> Errors);
+
+    private sealed record ScanCache(
+        string Root,
+        int NameCount,
+        List<ArchiveCache> Archives);
+
+    private static Dictionary<string, ArchiveCache> LoadArchiveCache(string root, int nameCount)
+    {
+        try
+        {
+            string path = CachePath(root);
+            if (!File.Exists(path)) return new(StringComparer.OrdinalIgnoreCase);
+            ScanCache? cache = JsonSerializer.Deserialize<ScanCache>(File.ReadAllText(path));
+            if (cache is null || !string.Equals(cache.Root, root, StringComparison.OrdinalIgnoreCase) || cache.NameCount != nameCount)
+                return new(StringComparer.OrdinalIgnoreCase);
+            return cache.Archives.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        }
+        catch { return new(StringComparer.OrdinalIgnoreCase); }
+    }
+
+    private static void SaveArchiveCache(string root, int nameCount, IEnumerable<ArchiveCache> archives)
+    {
+        try
+        {
+            string path = CachePath(root);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            string temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(new ScanCache(root, nameCount, archives.OrderBy(a => a.Path, StringComparer.OrdinalIgnoreCase).ToList())));
+            File.Move(temp, path, true);
+        }
+        catch { /* A cache must never make game scanning fail. */ }
+    }
+
+    private static string CachePath(string root)
+    {
+        string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(root)))[..24];
+        return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Cache", "archives-" + key + ".json");
     }
 
     public static byte[] Extract(GameAsset asset, IReadOnlyDictionary<uint, string> names)

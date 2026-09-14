@@ -104,6 +104,14 @@ to `manifest.json`, and provides a validator. Packs are staged for a future Scri
 runtime menu; a loose JSON/WAS folder is not loaded by the game, and no game archive is
 overwritten automatically.
 
+### Faster repeat scans
+
+The first scan of a game folder still has to read its RPF archives and decode each WAS
+set. RDR1 Animation Studio now stores an archive inventory, extracted-source manifest,
+and decoded catalog under `%LOCALAPPDATA%\RDR1AnimationStudio\Cache`. Selecting the
+same unchanged game folder again reuses those results; changing an RPF automatically
+invalidates the affected cache.
+
 ## Requirements / build
 
 Windows x64, .NET 10 Desktop Runtime (or SDK), Python 3.12 x64, and Blender. A Python 3.12

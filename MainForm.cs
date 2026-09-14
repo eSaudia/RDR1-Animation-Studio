@@ -42,6 +42,8 @@ internal sealed class MainForm : Form
     private int previewVersion;
     private static string ToolPath => Path.Combine(AppContext.BaseDirectory, "Tools", "WasInspector");
     internal sealed record SourceFile(string File, string Label);
+    private sealed record ArchiveStamp(string Path, long Length, long LastWriteUtcTicks);
+    private sealed record CollectionCache(string Root, int AnimationSetCount, List<ArchiveStamp> Archives, List<SourceFile> Sources);
     internal sealed record Clip(string Source, string Set, int Offset, string Name, int Frames, double Fps, double Duration, string Fingerprint, string Status, string DuplicateOf) {
         public string Availability => Status == "Supported" ? (DuplicateOf.Length > 0 ? "Identical motion" : "Supported") : "Needs decoder work";
         public string Identity => Source + "@" + Offset;
@@ -298,15 +300,27 @@ internal sealed class MainForm : Form
             var game = await GameLibrary.ScanAsync(dialog.SelectedPath, names, progress, token); var input = new List<SourceFile>();
             string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Library"); Directory.CreateDirectory(cache);
             var errors = new List<string>(game.Errors);
-            await Task.Run(() => { foreach (var group in game.AnimationSets.GroupBy(a => a.ArchivePath)) {
-                token.ThrowIfCancellationRequested(); using var archive = Rpf6Archive.Open(group.Key, names);
-                foreach (var asset in group) { token.ThrowIfCancellationRequested(); try {
-                    byte[] bytes = archive.Extract(archive.Entries[asset.EntryIndex]); string file = Path.Combine(cache, Convert.ToHexString(SHA256.HashData(bytes)) + ".was");
-                    if (!File.Exists(file)) File.WriteAllBytes(file, bytes);
-                    input.Add(new(file, Path.GetRelativePath(dialog.SelectedPath, group.Key) + "/" + asset.InternalPath));
-                } catch (Exception ex) { errors.Add(asset.InternalPath + ": " + ex.Message); } }
-                progress.Report($"Collecting {input.Count:N0}/{game.AnimationSets.Count:N0} animation sets…");
-            } }, token);
+            string collectionCache = CollectionCachePath(dialog.SelectedPath);
+            CollectionCache? savedCollection = TryLoadCollectionCache(collectionCache);
+            if (savedCollection is not null && CollectionCacheMatches(savedCollection, dialog.SelectedPath, game))
+            {
+                input.AddRange(savedCollection.Sources);
+                progress.Report($"Using cached animation extraction… {input.Count:N0} sets");
+            }
+            else
+            {
+                await Task.Run(() => { int completed = 0; foreach (var group in game.AnimationSets.GroupBy(a => a.ArchivePath)) {
+                    token.ThrowIfCancellationRequested(); using var archive = Rpf6Archive.Open(group.Key, names);
+                    foreach (var asset in group) { token.ThrowIfCancellationRequested(); try {
+                        byte[] bytes = archive.Extract(archive.Entries[asset.EntryIndex]); string file = Path.Combine(cache, Convert.ToHexString(SHA256.HashData(bytes)) + ".was");
+                        if (!File.Exists(file)) File.WriteAllBytes(file, bytes);
+                        input.Add(new(file, Path.GetRelativePath(dialog.SelectedPath, group.Key) + "/" + asset.InternalPath));
+                    } catch (Exception ex) { errors.Add(asset.InternalPath + ": " + ex.Message); }
+                    completed++; if (completed == 1 || completed % 25 == 0 || completed == game.AnimationSets.Count)
+                        progress.Report($"Collecting animation sets… {completed:N0}/{game.AnimationSets.Count:N0}"); }
+                } }, token);
+                SaveCollectionCache(collectionCache, dialog.SelectedPath, game, input);
+            }
             await IndexAsync(input, token); problems.AddRange(errors);
             SetCharacters(game.Characters);
             status.Text = $"Collection complete · {input.Count:N0} animation sets · {characters.Count:N0} preview characters.";
@@ -316,10 +330,99 @@ internal sealed class MainForm : Form
         if (busy) return; using var d = new OpenFileDialog { Title = "Add animation sets", Filter = "WAS|*.was", Multiselect = true }; if (d.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token => await IndexAsync(sources.Concat(d.FileNames.Select(f => new SourceFile(f, Path.GetFileName(f)))).Distinct().ToList(), token));
     }
+
+    private static string CollectionCachePath(string gameDirectory)
+    {
+        string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(gameDirectory))))[..24];
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Cache");
+        Directory.CreateDirectory(root);
+        return Path.Combine(root, "collection-" + key + ".json");
+    }
+
+    private static CollectionCache? TryLoadCollectionCache(string path)
+    {
+        try { return File.Exists(path) ? JsonSerializer.Deserialize<CollectionCache>(File.ReadAllText(path)) : null; }
+        catch { return null; }
+    }
+
+    private static bool CollectionCacheMatches(CollectionCache cache, string root, GameLibrary game)
+    {
+        if (!string.Equals(cache.Root, Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase) ||
+            cache.AnimationSetCount != game.AnimationSets.Count || cache.Archives.Count != game.Archives.Count ||
+            cache.Sources.Count != game.AnimationSets.Count) return false;
+        foreach (ArchiveStamp stamp in cache.Archives)
+        {
+            try
+            {
+                FileInfo info = new(stamp.Path);
+                if (info.Length != stamp.Length || info.LastWriteTimeUtc.Ticks != stamp.LastWriteUtcTicks) return false;
+            }
+            catch { return false; }
+        }
+        return cache.Sources.All(source => File.Exists(source.File));
+    }
+
+    private static void SaveCollectionCache(string path, string root, GameLibrary game, List<SourceFile> sources)
+    {
+        try
+        {
+            var stamps = game.Archives.Select(archive => {
+                FileInfo info = new(archive);
+                return new ArchiveStamp(archive, info.Length, info.LastWriteTimeUtc.Ticks);
+            }).ToList();
+            string temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(new CollectionCache(Path.GetFullPath(root), game.AnimationSets.Count, stamps, sources)));
+            File.Move(temp, path, true);
+        }
+        catch { /* A cache must never make collection fail. */ }
+    }
+
+    private static string CatalogCachePath(List<SourceFile> input)
+    {
+        var identity = input.Select(source => {
+            try
+            {
+                FileInfo info = new(source.File);
+                return new { source.File, source.Label, info.Length, LastWriteUtcTicks = info.LastWriteTimeUtc.Ticks };
+            }
+            catch { return new { source.File, source.Label, Length = -1L, LastWriteUtcTicks = -1L }; }
+        }).ToList();
+        string payload = "v0.10-catalog-2\n" + JsonSerializer.Serialize(identity);
+        string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload)))[..32];
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Cache", "Catalogs");
+        Directory.CreateDirectory(root);
+        return Path.Combine(root, key + ".json");
+    }
+
+    private static Catalog? TryLoadCatalogCache(string path)
+    {
+        try { return File.Exists(path) ? JsonSerializer.Deserialize<Catalog>(File.ReadAllText(path)) : null; }
+        catch { return null; }
+    }
+
+    private static void SaveCatalogCache(string path, Catalog catalog)
+    {
+        try
+        {
+            string temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(catalog));
+            File.Move(temp, path, true);
+        }
+        catch { /* A cache must never make indexing fail. */ }
+    }
+
     private async Task IndexAsync(List<SourceFile> input, CancellationToken token) {
         string job = Job(), manifest = Path.Combine(job, "sources.json"), output = Path.Combine(job, "catalog.json");
-        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(input), token); await Python("studio_library.py", ["index", manifest, output], token);
-        var result = JsonSerializer.Deserialize<Catalog>(await File.ReadAllTextAsync(output, token)) ?? throw new InvalidDataException("Empty catalog");
+        await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(input), token);
+        string cachedCatalog = CatalogCachePath(input);
+        Catalog? result = TryLoadCatalogCache(cachedCatalog);
+        if (result is null)
+        {
+            await Python("studio_library.py", ["index", manifest, output], token);
+            result = JsonSerializer.Deserialize<Catalog>(await File.ReadAllTextAsync(output, token)) ?? throw new InvalidDataException("Empty catalog");
+            SaveCatalogCache(cachedCatalog, result);
+        }
+        else status.Text = "Loaded cached animation catalog…";
         clips.Clear(); clips.AddRange(result.Clips); sources.Clear(); sources.AddRange(input); problems.Clear(); problems.AddRange(result.Errors.Select(e => e.ToString()));
         RefreshGrid(); status.Text = "Collection complete. Unsupported animations are explained in Scan report.";
     }
