@@ -19,6 +19,9 @@ internal sealed class MainForm : Form
     private readonly Panel libraryPage = new() { Dock = DockStyle.Fill };
     private readonly Panel infoPage = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly RichTextBox info = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 12) };
+    private readonly TextBox authorName = new() { Width = 260, Text = "custom_action" };
+    private readonly NumericUpDown authorFrames = new() { Width = 90, Minimum = 2, Maximum = 10000, Value = 90 };
+    private readonly NumericUpDown authorFps = new() { Width = 90, Minimum = 1, Maximum = 240, Value = 30 };
     private readonly List<Clip> clips = [];
     private readonly List<SourceFile> sources = [];
     private readonly List<string> problems = [];
@@ -53,7 +56,7 @@ internal sealed class MainForm : Form
         Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "studio.ico"));
         var nav = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 205, Padding = new Padding(18, 25, 5, 0), FlowDirection = FlowDirection.TopDown, WrapContents = false };
         nav.Controls.Add(new Label { Text = "RDR1\nANIMATION\nSTUDIO", Size = new Size(175, 125), Font = new Font("Segoe UI", 20, FontStyle.Bold) });
-        foreach (var (icon, name) in new[] { ("▦", "Library"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
+        foreach (var (icon, name) in new[] { ("▦", "Library"), ("✦", "Authoring"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
             var button = Button(icon + "   " + name, (_, _) => ShowPage(name)); button.Size = new Size(172, 48); button.AutoSize = false; button.TextAlign = ContentAlignment.MiddleLeft; nav.Controls.Add(button);
         }
         nav.Controls.Add(new Label { Text = "CREATED BY\neSaudia", Size = new Size(170, 60), Margin = new Padding(4, 80, 0, 0), Font = new Font("Segoe UI", 11, FontStyle.Bold) });
@@ -112,6 +115,7 @@ internal sealed class MainForm : Form
         else if (name.Contains("Select")) { g.DrawEllipse(p,3,3,18,18);g.DrawLines(p,[new Point(7,12),new Point(10,15),new Point(17,8)]); }
         else if (name.Contains("Cancel")) { g.DrawLine(p,6,6,18,18);g.DrawLine(p,18,6,6,18); }
         else if (name.Contains("report")) { g.DrawRectangle(p,5,3,14,18); for(int y=7;y<19;y+=5) g.DrawLine(p,8,y,16,y); }
+        else if (name.Contains("Authoring")) { g.DrawLine(p,5,19,19,5); g.DrawLine(p,5,5,19,19); g.DrawEllipse(p,9,9,6,6); }
         else { g.DrawEllipse(p,3,3,18,18);g.DrawLine(p,12,10,12,17);g.DrawEllipse(p,11,6,2,2); }
         return image;
     }
@@ -164,7 +168,35 @@ internal sealed class MainForm : Form
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
             var b = Button("↥ Import edited Blender animation…", async (_, _) => await ImportAsync()); b.Dock = DockStyle.Bottom; infoPage.Controls.Add(b);
         }
+        else if (page == "Authoring") BuildAuthoringPage();
         Theme();
+    }
+    private void BuildAuthoringPage()
+    {
+        info.Text = "CUSTOM ANIMATION AUTHORING\n\nCreate a clean Blender scene from the bundled RDR1 human rig, then edit the named action in Blender's Dope Sheet or Graph Editor. The scene uses the exact frame count and FPS you choose.\n\nThis is the safe authoring path: it does not overwrite game archives. After editing, export a .blend and use Import for an existing supported WAS clip. Creating a brand-new WAS record is still experimental and is not silently attempted.\n\nCharacter geometry, materials and armature are included in the generated Blender file.";
+        var panel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 150, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
+        panel.Controls.Add(new Label { Text = "Action name", AutoSize = true, Padding = new Padding(0, 7, 6, 0) }); panel.Controls.Add(authorName);
+        panel.Controls.Add(new Label { Text = "Frames", AutoSize = true, Padding = new Padding(16, 7, 6, 0) }); panel.Controls.Add(authorFrames);
+        panel.Controls.Add(new Label { Text = "FPS", AutoSize = true, Padding = new Padding(16, 7, 6, 0) }); panel.Controls.Add(authorFps);
+        var create = Button("✦ Create Blender authoring scene…", async (_, _) => await CreateAuthoringSceneAsync()); create.Width = 260; panel.Controls.Add(create);
+        panel.Controls.Add(new Label { Text = "Start with 90 frames at 30 FPS, pose the rig, and add keyframes in Blender.", AutoSize = true, Padding = new Padding(0, 14, 0, 0) });
+        infoPage.Controls.Add(panel);
+    }
+    private async Task CreateAuthoringSceneAsync()
+    {
+        if (busy) return;
+        string name = authorName.Text.Trim();
+        if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) { MessageBox.Show(this, "Enter a valid action name.", "Custom authoring"); return; }
+        string? exe = Blender(); if (exe is null) return;
+        using var save = new SaveFileDialog { Title = "Save Blender authoring scene", Filter = "Blender scene|*.blend", FileName = name + ".blend", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token => {
+            string script = Path.Combine(ToolPath, "blender_authoring_setup.py");
+            await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName, "--name", name, "--frames", authorFrames.Value.ToString(), "--fps", authorFps.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)], token);
+            status.Text = "Authoring scene created · " + Path.GetFileName(save.FileName);
+            if (MessageBox.Show(this, "Authoring scene created. Open it in Blender now?", "Custom authoring", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
+        });
     }
     private void RefreshGrid() {
         var selected = grid.SelectedRows.Cast<DataGridViewRow>().Select(r => (r.DataBoundItem as Clip)?.Identity).ToHashSet(); string query = search.Text.Trim();
