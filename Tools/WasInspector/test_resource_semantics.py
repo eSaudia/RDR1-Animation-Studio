@@ -1,6 +1,6 @@
 import struct
 
-from resource_semantics import decode, decode_vm
+from resource_semantics import decode, decode_vm, load_native_database, load_native_database_metadata
 
 
 def test_rbf_cutscene_labels_are_semantic():
@@ -45,3 +45,44 @@ def test_vm_resolves_native_table_hashes_without_names():
     assert call["args"]["nativeHash"] == "0x12345678"
     assert call["args"]["parameterCount"] == 1
     assert call["args"]["returnsValue"] is True
+
+
+def test_vm_resolves_native_name_from_database(tmp_path):
+    database = tmp_path / "natives.json"
+    database.write_text('{"natives": [{"hash": "0x12345678", "name": "TASK_MOVE"}]}', encoding="utf-8")
+    names, selected = load_native_database(database)
+    assert selected == str(database)
+    assert names[0x12345678] == "TASK_MOVE"
+    header = struct.pack(">11I", 0xA8D74300, 0x5000002C, 0x5000002C, 3, 0, 0, 0, 0x8A019D34, 1, 0x50000034, 0)
+    payload = header + struct.pack(">I", 0x50000030) + bytes([0x2C, 0, 3]) + b"\0" + struct.pack(">I", 0x12345678)
+    report = decode_vm(payload, native_names=names)
+    call = report["functions"][0]["instructions"][0]
+    assert call["args"]["nativeName"] == "TASK_MOVE"
+    assert report["nativeTable"][0]["name"] == "TASK_MOVE"
+
+
+def test_native_database_accepts_hash_to_name_object(tmp_path):
+    database = tmp_path / "natives.json"
+    database.write_text('{"0xABCDEF01": "AUDIO_PLAY"}', encoding="utf-8")
+    names, _ = load_native_database(database)
+    assert names == {0xABCDEF01: "AUDIO_PLAY"}
+
+
+def test_native_database_accepts_category_hash_records(tmp_path):
+    database = tmp_path / "natives.json"
+    database.write_text('{"ACTOR": {"0x2D54B916": {"name": "TELEPORT_ACTOR", "return_type": "void"}}}', encoding="utf-8")
+    names, _ = load_native_database(database)
+    assert names[0x2D54B916] == "TELEPORT_ACTOR"
+
+
+def test_native_metadata_adds_signature_to_call(tmp_path):
+    database = tmp_path / "natives.json"
+    database.write_text('{"ACTOR": {"0x12345678": {"name": "TASK_MOVE", "params": [{"type": "Actor"}, {"type": "Vector3*"}], "return_type": "BOOL"}}}', encoding="utf-8")
+    metadata, _ = load_native_database_metadata(database)
+    names = {native_hash: item["name"] for native_hash, item in metadata.items()}
+    header = struct.pack(">11I", 0xA8D74300, 0x5000002C, 0x5000002C, 3, 0, 0, 0, 0x8A019D34, 1, 0x50000034, 0)
+    payload = header + struct.pack(">I", 0x50000030) + bytes([0x2C, 0, 3]) + b"\0" + struct.pack(">I", 0x12345678)
+    report = decode_vm(payload, native_names=names, native_metadata=metadata)
+    args = report["functions"][0]["instructions"][0]["args"]
+    assert args["nativeParameterTypes"] == ["Actor", "Vector3*"]
+    assert args["nativeReturnType"] == "BOOL"

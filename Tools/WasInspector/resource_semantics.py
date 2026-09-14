@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import struct
 import zlib
@@ -53,7 +54,96 @@ RDR_ONE_BYTE = {
     "pPeekSet", "ToStack", "FromStack", "PushStringNull", "MemCopy", "Catch", "Throw", "pCall"
 }
 
-def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None = None) -> tuple[dict[str, Any], int] | None:
+def _normalize_native_hash(value: Any) -> int | None:
+    """Normalize native ids from common database JSON representations."""
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value & 0xFFFFFFFF
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text, 0) & 0xFFFFFFFF
+        except ValueError:
+            return int(text, 16) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return None
+
+
+def load_native_database_metadata(path: str | Path | None = None) -> tuple[dict[int, dict[str, Any]], str | None]:
+    """Load optional RDR1 native names, parameter types, and return types."""
+    candidates: list[Path] = []
+    if path:
+        candidates.append(Path(path))
+    env_path = os.environ.get("RDR1_NATIVE_DB")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path(__file__).resolve().parents[2] / "Assets" / "rdr1-natives.json")
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        candidates.append(Path(local_app) / "RDR1AnimationStudio" / "natives.json")
+    selected = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if selected is None:
+        return {}, None
+    try:
+        raw = json.loads(selected.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}, str(selected)
+    records: Any = raw
+    if isinstance(raw, dict):
+        for key in ("natives", "commands", "entries", "functions", "data"):
+            if key in raw and isinstance(raw[key], (dict, list)):
+                records = raw[key]
+                break
+    result: dict[int, dict[str, Any]] = {}
+    def visit(value: Any, key_hint: Any = None) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        native_hash = _normalize_native_hash(value.get("hash"))
+        if native_hash is None:
+            native_hash = _normalize_native_hash(value.get("nativeHash"))
+        if native_hash is None:
+            native_hash = _normalize_native_hash(value.get("id"))
+        if native_hash is None:
+            native_hash = _normalize_native_hash(value.get("value"))
+        if native_hash is None:
+            native_hash = _normalize_native_hash(key_hint)
+        name = value.get("name") or value.get("command") or value.get("function") or value.get("label")
+        if native_hash is not None and isinstance(name, str) and name.strip():
+            metadata: dict[str, Any] = {"name": name.strip()}
+            params = value.get("params")
+            if isinstance(params, list):
+                metadata["parameterTypes"] = [item.get("type") for item in params if isinstance(item, dict) and isinstance(item.get("type"), str)]
+            return_type = value.get("return_type") or value.get("returnType")
+            if isinstance(return_type, str) and return_type.strip():
+                metadata["returnType"] = return_type.strip()
+            result[native_hash] = metadata
+        for key, child in value.items():
+            if key not in {"hash", "nativeHash", "id", "value", "name", "command", "function", "label", "comment", "params", "return_type"}:
+                child_hash = _normalize_native_hash(key)
+                if child_hash is not None and isinstance(child, str) and child.strip():
+                    result[child_hash] = {"name": child.strip()}
+                else:
+                    visit(child, key)
+    visit(records)
+    return result, str(selected)
+
+
+def load_native_database(path: str | Path | None = None) -> tuple[dict[int, str], str | None]:
+    """Compatibility wrapper returning only native hash-to-name mappings."""
+    metadata, selected = load_native_database_metadata(path)
+    return {native_hash: item["name"] for native_hash, item in metadata.items() if item.get("name")}, selected
+
+
+def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None = None,
+                     native_names: dict[int, str] | None = None,
+                     native_metadata: dict[int, dict[str, Any]] | None = None) -> tuple[dict[str, Any], int] | None:
     """Decode one RDR instruction using the validated RASM size rules."""
     if offset >= len(data):
         return None
@@ -77,7 +167,16 @@ def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None =
                 args["parameterCount"] = (native_data & 0x3E) >> 1
                 args["returnsValue"] = bool(native_data & 1)
                 if native_values is not None and args["nativeIndex"] < len(native_values):
-                    args["nativeHash"] = f"0x{native_values[args['nativeIndex']]:08X}"
+                    native_hash = native_values[args["nativeIndex"]]
+                    args["nativeHash"] = f"0x{native_hash:08X}"
+                    if native_names and native_hash in native_names:
+                        args["nativeName"] = native_names[native_hash]
+                    if native_metadata and native_hash in native_metadata:
+                        metadata = native_metadata[native_hash]
+                        if metadata.get("parameterTypes"):
+                            args["nativeParameterTypes"] = metadata["parameterTypes"]
+                        if metadata.get("returnType"):
+                            args["nativeReturnType"] = metadata["returnType"]
             elif name == "Call2" or name.startswith("Call2h"):
                 call_type = 0 if name == "Call2" else int(name[-1], 16)
                 args["callType"] = call_type
@@ -110,7 +209,9 @@ def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None =
     return ({"offset": offset, "opcode": opcode, "name": name, "bytes": data[offset:offset + size].hex(), "args": args, "confidence": "opcode name and size validated against RDR backend"}, size)
 
 
-def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
+def decode_vm(data: bytes, starts: list[int] | None = None,
+              native_names: dict[int, str] | None = None,
+              native_metadata: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     pointers = []
     for offset in range(0, min(len(data), 0x2000) - 3, 4):
         value = int.from_bytes(data[offset:offset + 4], "little")
@@ -176,7 +277,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
         instructions = []
         pos = start
         for _ in range(256):
-            decoded = _rdr_instruction(data, pos, native_values)
+            decoded = _rdr_instruction(data, pos, native_values, native_names, native_metadata)
             if decoded is None:
                 break
             ins, size = decoded; instructions.append(ins); pos += size
@@ -185,7 +286,22 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
         known = sum(1 for ins in instructions if ins.get("name"))
         if len(instructions) >= 2 and known / len(instructions) >= 0.65:
             functions.append({"start": start, "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3), "instructions": instructions})
-    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native table values are raw hashes; control-flow meaning remains partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": [{"index": i, "hash": f"0x{value:08X}"} for i, value in enumerate(native_values[:4096])], "functions": functions, "unresolved": ["native hash/name table", "script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]}
+    native_table = []
+    for i, value in enumerate(native_values[:4096]):
+        entry: dict[str, Any] = {"index": i, "hash": f"0x{value:08X}"}
+        if native_names and value in native_names:
+            entry["name"] = native_names[value]
+        if native_metadata and value in native_metadata:
+            metadata = native_metadata[value]
+            if metadata.get("parameterTypes"):
+                entry["parameterTypes"] = metadata["parameterTypes"]
+            if metadata.get("returnType"):
+                entry["returnType"] = metadata["returnType"]
+        native_table.append(entry)
+    unresolved = ["script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]
+    if not native_names:
+        unresolved.insert(0, "native hash/name table")
+    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native hashes resolved when an optional database is supplied; control-flow meaning remains partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": native_table, "functions": functions, "unresolved": unresolved}
 
 
 def strings(data: bytes) -> list[dict[str, Any]]:
@@ -274,7 +390,8 @@ def decode_xml(data: bytes) -> dict[str, Any]:
     }
 
 
-def decode(data: bytes) -> dict[str, Any]:
+def decode(data: bytes, native_names: dict[int, str] | None = None,
+           native_metadata: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     if data[:4] == b"RBF0":
         return decode_rbf0(data)
     if data[:4] in RSC_MAGICS:
@@ -286,7 +403,7 @@ def decode(data: bytes) -> dict[str, Any]:
                 with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(payload)) as reader:
                     expanded = reader.read()
                 report["expandedSize"] = len(expanded)
-                report["payload"] = decode(expanded)
+                report["payload"] = decode(expanded, native_names, native_metadata)
                 return report
             except Exception as exc:
                 report["decompressionError"] = str(exc)
@@ -301,7 +418,7 @@ def decode(data: bytes) -> dict[str, Any]:
             expanded = zstandard.ZstdDecompressor().decompress(data)
         except Exception as exc:
             return {"format": "Zstandard", "confidence": "verified frame header; payload could not be expanded", "compressedSize": len(data), "decompressionError": str(exc), "unresolved": ["truncated/invalid Zstandard frame"]}
-        result = decode(expanded)
+        result = decode(expanded, native_names, native_metadata)
         result["compression"] = {"format": "Zstandard", "compressedSize": len(data), "expandedSize": len(expanded)}
         return result
     found = strings(data)
@@ -316,7 +433,7 @@ def decode(data: bytes) -> dict[str, Any]:
     for offset in range(0, len(data) - 3, 4):
         opcode = data[offset]
         histogram[f"0x{opcode:02X}"] = histogram.get(f"0x{opcode:02X}", 0) + 1
-    vm = decode_vm(data)
+    vm = decode_vm(data, native_names=native_names, native_metadata=native_metadata)
     return {
         "format": "raw", "confidence": "verified byte stream and printable identifiers only", "size": len(data),
         "strings": found, "semanticCounts": {"identifiers": len(identifiers), "animationIdentifiers": sum("_" in item["value"] and any(item["value"].lower().startswith(prefix) for prefix in ("air_", "grd_", "gent_", "gped_", "zomb_")) for item in identifiers)},
@@ -330,8 +447,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("resource", type=Path)
     parser.add_argument("-o", "--output", type=Path)
+    parser.add_argument("--native-db", type=Path, help="Optional RDR1 native hash database JSON")
     args = parser.parse_args()
-    report = decode(args.resource.read_bytes())
+    native_metadata, native_path = load_native_database_metadata(args.native_db)
+    native_names = {native_hash: item["name"] for native_hash, item in native_metadata.items() if item.get("name")}
+    report = decode(args.resource.read_bytes(), native_names, native_metadata)
+    report["nativeDatabase"] = {"path": native_path, "count": len(native_metadata)}
     report["source"] = str(args.resource)
     encoded = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:

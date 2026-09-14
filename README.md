@@ -121,6 +121,20 @@ equivalent below. It produces a portable `.semantics.json` evidence report:
 RDR1AnimationStudio.exe --decode-resource extracted-resource.bin report.semantics.json
 ```
 
+The desktop **Decode resource semantics…** action automatically forwards a
+discovered native database. For scripting/CI, invoke the bundled helper
+directly when you want name resolution:
+
+```powershell
+python Tools\WasInspector\resource_semantics.py extracted-resource.bin --output report.semantics.json --native-db Assets\rdr1-natives.json
+```
+
+The Scan report also provides **Import native database…**. Choose the downloaded
+JSON once and the app stores it at `%LOCALAPPDATA%\RDR1AnimationStudio\natives.json`.
+When parameter metadata is present, each decoded call additionally reports
+`nativeParameterTypes` and `nativeReturnType`, so a script review can distinguish
+an actor, camera, AI, or audio native from an unknown hash.
+
 After a game-folder scan, **Build VM header index…** extracts the identified
 mission resources to a temporary workspace, expands supported RSC/Zstandard
 payloads, and writes one archive-wide `rdr1-mission-vm-index.json`. The temporary
@@ -138,8 +152,15 @@ where the format is known. It also records the header signature, code length,
 native/static counts, relative-pointer fields, and code-block starts. The opcode names and size rules are cross-checked
 against the public RDR backend in [RASM](https://github.com/NativeFunction/RASM).
 `CallNative` entries now include the encoded parameter/return bits and the raw
-32-bit native-table hash when the header points to a valid table; names are not
-invented when a matching database is unavailable.
+32-bit native-table hash when the header points to a valid table. This milestone
+can also resolve those hashes to names without bundling third-party data: pass
+`--native-db`, set `RDR1_NATIVE_DB`, place `Assets\rdr1-natives.json` beside the
+application, or put `natives.json` in `%LOCALAPPDATA%\RDR1AnimationStudio`.
+The loader accepts either a hash-to-name object or records containing `hash`/
+`nativeHash` and `name`/`command` fields. The archive-wide VM index accepts the
+same `--native-db` option and records the database path/count. A community source
+such as [rdr-nativedb-data](https://github.com/TheRouletteBoi/rdr-nativedb-data)
+can be used after checking its license; the app never downloads it automatically.
 Generic RSC objects are deliberately not disassembled merely because they contain
 relative pointers; they remain evidence-only until a script header is found. RSC
 wrappers, Zstandard frames, and unknown streams are identified without pretending
@@ -157,6 +178,6 @@ dotnet build -c Release
 dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
-46 Python tests cover codecs, duplicate identity, timing rejection, import writes,
+49 Python tests cover codecs, duplicate identity, timing rejection, import writes,
 shared-track rejection, and existing decoder behavior. See WAS-ROUNDTRIP.md for the
 earlier encoder research; that document describes version 0.7, not the current UI.

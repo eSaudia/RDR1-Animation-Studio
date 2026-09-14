@@ -8,14 +8,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-from resource_semantics import decode
+from resource_semantics import decode, load_native_database_metadata
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path, help="JSON array of extracted resource records")
     parser.add_argument("output", type=Path)
+    parser.add_argument("--native-db", type=Path, help="Optional RDR1 native hash database JSON")
     args = parser.parse_args()
+    native_metadata, native_path = load_native_database_metadata(args.native_db)
+    native_names = {native_hash: item["name"] for native_hash, item in native_metadata.items() if item.get("name")}
     records = json.loads(args.manifest.read_text(encoding="utf-8"))
     resources: list[dict[str, Any]] = []
     header_count = 0
@@ -23,7 +26,7 @@ def main() -> int:
     for item in records:
         path = Path(item["file"])
         try:
-            report = decode(path.read_bytes())
+            report = decode(path.read_bytes(), native_names, native_metadata)
             payload = report.get("payload", report)
             evidence = payload.get("vmEvidence", {}) if isinstance(payload, dict) else {}
             disassembly = evidence.get("disassembly", {}) if isinstance(evidence, dict) else {}
@@ -55,6 +58,7 @@ def main() -> int:
         "resourceCount": len(resources),
         "validHeaderCount": header_count,
         "functionCount": function_count,
+        "nativeDatabase": {"path": native_path, "count": len(native_metadata)},
         "resources": resources,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

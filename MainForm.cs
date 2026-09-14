@@ -187,10 +187,12 @@ internal sealed class MainForm : Form
                 $"  Props: {gameLibrary.Props.Count:N0}\n" +
                 $"  AI data: {gameLibrary.AiData.Count:N0}\n" +
                 $"  Audio: {gameLibrary.Audio.Count:N0}\n\n" +
+                $"Native database: {(FindNativeDatabase() is string nativeDb ? nativeDb : "not configured (raw hashes will be retained)")}\n\n" +
                 "These counts are a safe inventory only; binary mission decoding is not silently substituted.\n\n";
             info.Text = "SCAN REPORT\n\n" + inventory + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
             var decode = Button("◈ Decode resource semantics…", async (_, _) => await DecodeResourceAsync()); decode.Dock = DockStyle.Bottom; infoPage.Controls.Add(decode);
             var vmIndex = Button("▣ Build VM header index…", async (_, _) => await BuildVmIndexAsync()); vmIndex.Dock = DockStyle.Bottom; infoPage.Controls.Add(vmIndex);
+            var importNative = Button("⌘ Import native database…", async (_, _) => await ImportNativeDatabaseAsync()); importNative.Dock = DockStyle.Bottom; infoPage.Controls.Add(importNative);
         }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -215,7 +217,10 @@ internal sealed class MainForm : Form
             {
                 try
                 {
-                    await Execute(python, [semanticScript, open.FileName, "--output", save.FileName], CancellationToken.None, true);
+                    var semanticArgs = new List<string> { semanticScript, open.FileName, "--output", save.FileName };
+                    string? nativeDb = FindNativeDatabase();
+                    if (nativeDb is not null) { semanticArgs.Add("--native-db"); semanticArgs.Add(nativeDb); }
+                    await Execute(python, semanticArgs.ToArray(), CancellationToken.None, true);
                     status.Text = "Semantic report written · " + Path.GetFileName(save.FileName);
                     MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.", "Semantic decode complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
@@ -245,6 +250,7 @@ internal sealed class MainForm : Form
             string? python = FindWorkingPython();
             string batchScript = Path.Combine(ToolPath, "mission_vm_batch.py");
             if (python is null || !File.Exists(batchScript)) throw new FileNotFoundException("Python 3.12 is required for the VM indexer.");
+            string? nativeDb = FindNativeDatabase();
             string tempRoot = Path.Combine(Path.GetTempPath(), "RDR1AnimationStudio-vm-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempRoot);
             try
@@ -263,7 +269,9 @@ internal sealed class MainForm : Form
                 }
                 string manifestPath = Path.Combine(tempRoot, "manifest.json");
                 await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(manifest), token);
-                await Execute(python, [batchScript, manifestPath, save.FileName], token, true);
+                var batchArgs = new List<string> { batchScript, manifestPath, save.FileName };
+                if (nativeDb is not null) { batchArgs.Add("--native-db"); batchArgs.Add(nativeDb); }
+                await Execute(python, batchArgs.ToArray(), token, true);
                 status.Text = "VM index written · " + Path.GetFileName(save.FileName);
                 MessageBox.Show(this, "Mission VM index written to:\n\n" + save.FileName + "\n\nOnly validated script headers are counted as decoded.", "VM index complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -272,6 +280,25 @@ internal sealed class MainForm : Form
                 try { Directory.Delete(tempRoot, true); } catch { }
             }
         });
+    }
+    private async Task ImportNativeDatabaseAsync()
+    {
+        using var open = new OpenFileDialog { Title = "Select an RDR1 native database", Filter = "JSON database|*.json|All files|*.*", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            FileInfo source = new(open.FileName);
+            if (source.Length == 0) throw new InvalidDataException("The selected file is empty.");
+            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio");
+            Directory.CreateDirectory(folder);
+            string target = Path.Combine(folder, "natives.json");
+            File.Copy(source.FullName, target, true);
+            status.Text = "Native database imported · " + source.Name;
+            MessageBox.Show(this, "Native database imported. Future semantic decodes and VM indexes will resolve matching hashes to names and signatures.\n\nStored at:\n" + target, "Native database", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ShowPage("Scan report");
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Could not import native database:\n" + ex.Message, "Native database", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        await Task.CompletedTask;
     }
     private void BuildAuthoringPage()
     {
@@ -702,5 +729,13 @@ internal sealed class MainForm : Form
             }
         } catch { } }
         return null;
+    }
+    internal static string? FindNativeDatabase() {
+        string? configured = Environment.GetEnvironmentVariable("RDR1_NATIVE_DB");
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured)) return Path.GetFullPath(configured);
+        string bundled = Path.Combine(AppContext.BaseDirectory, "Assets", "rdr1-natives.json");
+        if (File.Exists(bundled)) return bundled;
+        string local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "natives.json");
+        return File.Exists(local) ? local : null;
     }
 }
