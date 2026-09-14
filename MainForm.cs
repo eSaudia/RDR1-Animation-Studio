@@ -22,6 +22,7 @@ internal sealed class MainForm : Form
     private readonly TextBox authorName = new() { Width = 260, Text = "custom_action" };
     private readonly NumericUpDown authorFrames = new() { Width = 90, Minimum = 2, Maximum = 10000, Value = 90 };
     private readonly NumericUpDown authorFps = new() { Width = 90, Minimum = 1, Maximum = 240, Value = 30 };
+    private readonly ComboBox authorPreset = new() { Width = 220, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly List<Clip> clips = [];
     private readonly List<SourceFile> sources = [];
     private readonly List<string> problems = [];
@@ -54,6 +55,7 @@ internal sealed class MainForm : Form
         Text = "RDR1 Animation Studio — eSaudia"; Size = new Size(1400, 860); MinimumSize = new Size(1140, 700);
         Font = new Font("Segoe UI", 10); StartPosition = FormStartPosition.CenterScreen;
         Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "studio.ico"));
+        authorPreset.Items.AddRange(["Blank authoring pose", "Spider leap (demo)"]); authorPreset.SelectedIndex = 0;
         var nav = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 205, Padding = new Padding(18, 25, 5, 0), FlowDirection = FlowDirection.TopDown, WrapContents = false };
         nav.Controls.Add(new Label { Text = "RDR1\nANIMATION\nSTUDIO", Size = new Size(175, 125), Font = new Font("Segoe UI", 20, FontStyle.Bold) });
         foreach (var (icon, name) in new[] { ("▦", "Library"), ("✦", "Authoring"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
@@ -178,6 +180,7 @@ internal sealed class MainForm : Form
         panel.Controls.Add(new Label { Text = "Action name", AutoSize = true, Padding = new Padding(0, 7, 6, 0) }); panel.Controls.Add(authorName);
         panel.Controls.Add(new Label { Text = "Frames", AutoSize = true, Padding = new Padding(16, 7, 6, 0) }); panel.Controls.Add(authorFrames);
         panel.Controls.Add(new Label { Text = "FPS", AutoSize = true, Padding = new Padding(16, 7, 6, 0) }); panel.Controls.Add(authorFps);
+        panel.Controls.Add(new Label { Text = "Preset", AutoSize = true, Padding = new Padding(16, 7, 6, 0) }); panel.Controls.Add(authorPreset);
         var create = Button("✦ Create Blender authoring scene…", async (_, _) => await CreateAuthoringSceneAsync()); create.Width = 260; panel.Controls.Add(create);
         panel.Controls.Add(new Label { Text = "Start with 90 frames at 30 FPS, pose the rig, and add keyframes in Blender.", AutoSize = true, Padding = new Padding(0, 14, 0, 0) });
         infoPage.Controls.Add(panel);
@@ -192,7 +195,8 @@ internal sealed class MainForm : Form
         if (save.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token => {
             string script = Path.Combine(ToolPath, "blender_authoring_setup.py");
-            await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName, "--name", name, "--frames", authorFrames.Value.ToString(), "--fps", authorFps.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)], token);
+            string preset = authorPreset.SelectedIndex == 1 ? "spider_leap" : "blank";
+            await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName, "--name", name, "--frames", authorFrames.Value.ToString(), "--fps", authorFps.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "--preset", preset], token);
             status.Text = "Authoring scene created · " + Path.GetFileName(save.FileName);
             if (MessageBox.Show(this, "Authoring scene created. Open it in Blender now?", "Custom authoring", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });

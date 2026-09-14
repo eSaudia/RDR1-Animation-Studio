@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ def args() -> argparse.Namespace:
     parser.add_argument("--name", required=True)
     parser.add_argument("--frames", type=int, required=True)
     parser.add_argument("--fps", type=float, required=True)
+    parser.add_argument("--preset", choices=("blank", "spider_leap"), default="blank")
     marker = sys.argv.index("--") + 1 if "--" in sys.argv else len(sys.argv)
     return parser.parse_args(sys.argv[marker:])
 
@@ -43,14 +45,61 @@ def main() -> int:
     action.use_fake_user = True
     armature.animation_data_create()
     armature.animation_data.action = action
-    for bone in armature.pose.bones:
-        bone.rotation_mode = "QUATERNION"
-        bone.keyframe_insert("location", frame=1)
-        bone.keyframe_insert("rotation_quaternion", frame=1)
-        bone.keyframe_insert("scale", frame=1)
-        bone.keyframe_insert("location", frame=options.frames)
-        bone.keyframe_insert("rotation_quaternion", frame=options.frames)
-        bone.keyframe_insert("scale", frame=options.frames)
+    base = {bone.name: (bone.location.copy(), bone.rotation_quaternion.copy(), bone.scale.copy())
+            for bone in armature.pose.bones}
+
+    def restore_base() -> None:
+        for bone in armature.pose.bones:
+            location, rotation, scale = base[bone.name]
+            bone.location = location
+            bone.rotation_mode = "QUATERNION"
+            bone.rotation_quaternion = rotation
+            bone.scale = scale
+
+    def key_all(frame: int) -> None:
+        for bone in armature.pose.bones:
+            bone.keyframe_insert("location", frame=frame)
+            bone.keyframe_insert("rotation_quaternion", frame=frame)
+            bone.keyframe_insert("scale", frame=frame)
+
+    def pose(frame: int, *, root_y: float = 0.0, rotations: dict[str, tuple[float, float, float]] | None = None) -> None:
+        restore_base()
+        root = armature.pose.bones.get("character_root")
+        if root:
+            root.location.y += root_y
+        for name, angles in (rotations or {}).items():
+            bone = armature.pose.bones.get(name)
+            if bone:
+                delta = __import__("mathutils").Euler(tuple(math.radians(angle) for angle in angles), "XYZ").to_quaternion()
+                bone.rotation_quaternion = bone.rotation_quaternion @ delta
+        key_all(frame)
+
+    if options.preset == "spider_leap":
+        # Readable non-destructive sample: crouch, leap/reach, then land.
+        pose(1)
+        pose(max(2, round(options.frames * 0.24)), root_y=-0.12, rotations={
+            "spine01": (12, 0, 0), "spine02": (18, 0, 0), "spine03": (22, 0, 0),
+            "neck": (-8, 0, 0), "arm_l": (-28, 0, -16), "elbow_l": (-55, 0, 0),
+            "arm_r": (-28, 0, 16), "elbow_r": (-55, 0, 0), "hip_l": (-18, 0, 0),
+            "knee_l": (42, 0, 0), "hip_r": (-18, 0, 0), "knee_r": (42, 0, 0),
+        })
+        pose(max(3, round(options.frames * 0.52)), root_y=0.38, rotations={
+            "spine01": (-8, 0, 0), "spine02": (-12, 0, 0), "spine03": (-14, 0, 0),
+            "neck": (6, 0, 0), "arm_l": (-70, 0, -28), "elbow_l": (-18, 0, 0),
+            "arm_r": (-70, 0, 28), "elbow_r": (-18, 0, 0), "hip_l": (22, 0, 0),
+            "knee_l": (-28, 0, 0), "hip_r": (22, 0, 0), "knee_r": (-28, 0, 0),
+        })
+        pose(max(4, round(options.frames * 0.76)), root_y=-0.08, rotations={
+            "spine01": (10, 0, 0), "spine02": (14, 0, 0), "spine03": (16, 0, 0),
+            "neck": (-5, 0, 0), "arm_l": (-35, 0, -18), "elbow_l": (-48, 0, 0),
+            "arm_r": (-35, 0, 18), "elbow_r": (-48, 0, 0), "hip_l": (-12, 0, 0),
+            "knee_l": (35, 0, 0), "hip_r": (-12, 0, 0), "knee_r": (35, 0, 0),
+        })
+        pose(options.frames)
+    else:
+        restore_base()
+        key_all(1)
+        key_all(options.frames)
     scene = bpy.context.scene
     scene.render.fps = max(1, round(options.fps))
     scene.render.fps_base = scene.render.fps / options.fps
@@ -62,6 +111,7 @@ def main() -> int:
         "action": options.name,
         "frames": options.frames,
         "fps": options.fps,
+        "preset": options.preset,
         "source": "RDR1 Animation Studio bundled human rig",
         "note": "Edit this action in Blender. Existing WAS import remains fixed-layout experimental.",
     }
