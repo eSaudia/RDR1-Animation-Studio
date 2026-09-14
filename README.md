@@ -121,6 +121,11 @@ equivalent below. It produces a portable `.semantics.json` evidence report:
 RDR1AnimationStudio.exe --decode-resource extracted-resource.bin report.semantics.json
 ```
 
+After a game-folder scan, **Build VM header index…** extracts the identified
+mission resources to a temporary workspace, expands supported RSC/Zstandard
+payloads, and writes one archive-wide `rdr1-mission-vm-index.json`. The temporary
+files are removed after indexing; only the report is retained.
+
 Validated `camera.rpf` entries that contain XML are decoded into typed elements
 and attributes (booleans, integers, floats, references). Validated `RBF0`
 cutscene resources are indexed by class, object type, camera/actor/prop/audio/

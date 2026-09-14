@@ -190,6 +190,7 @@ internal sealed class MainForm : Form
                 "These counts are a safe inventory only; binary mission decoding is not silently substituted.\n\n";
             info.Text = "SCAN REPORT\n\n" + inventory + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
             var decode = Button("◈ Decode resource semantics…", async (_, _) => await DecodeResourceAsync()); decode.Dock = DockStyle.Bottom; infoPage.Controls.Add(decode);
+            var vmIndex = Button("▣ Build VM header index…", async (_, _) => await BuildVmIndexAsync()); vmIndex.Dock = DockStyle.Bottom; infoPage.Controls.Add(vmIndex);
         }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -228,6 +229,49 @@ internal sealed class MainForm : Form
             MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.", "Semantic decode complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { MessageBox.Show(this, "Could not decode resource:\n" + ex.Message, "Semantic decode", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+    private async Task BuildVmIndexAsync()
+    {
+        if (busy) return;
+        if (gameLibrary is null || gameLibrary.MissionScripts.Count == 0)
+        {
+            MessageBox.Show(this, "Choose a game folder first so the mission resource inventory is available.", "VM header index");
+            return;
+        }
+        using var save = new SaveFileDialog { Title = "Save mission VM index", Filter = "JSON report|*.json", FileName = "rdr1-mission-vm-index.json", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            string? python = FindWorkingPython();
+            string batchScript = Path.Combine(ToolPath, "mission_vm_batch.py");
+            if (python is null || !File.Exists(batchScript)) throw new FileNotFoundException("Python 3.12 is required for the VM indexer.");
+            string tempRoot = Path.Combine(Path.GetTempPath(), "RDR1AnimationStudio-vm-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempRoot);
+            try
+            {
+                var manifest = new List<Dictionary<string, object?>>();
+                int completed = 0;
+                foreach (GameAsset asset in gameLibrary.MissionScripts)
+                {
+                    token.ThrowIfCancellationRequested();
+                    byte[] bytes = GameLibrary.Extract(asset, archiveNames);
+                    string file = Path.Combine(tempRoot, asset.EntryIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) + ".bin");
+                    await File.WriteAllBytesAsync(file, bytes, token);
+                    manifest.Add(new Dictionary<string, object?> { ["file"] = file, ["name"] = asset.Name, ["archive"] = asset.ArchivePath, ["internalPath"] = asset.InternalPath, ["entryIndex"] = asset.EntryIndex });
+                    completed++;
+                    status.Text = $"Preparing VM index · {completed:N0}/{gameLibrary.MissionScripts.Count:N0}";
+                }
+                string manifestPath = Path.Combine(tempRoot, "manifest.json");
+                await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(manifest), token);
+                await Execute(python, [batchScript, manifestPath, save.FileName], token, true);
+                status.Text = "VM index written · " + Path.GetFileName(save.FileName);
+                MessageBox.Show(this, "Mission VM index written to:\n\n" + save.FileName + "\n\nOnly validated script headers are counted as decoded.", "VM index complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally
+            {
+                try { Directory.Delete(tempRoot, true); } catch { }
+            }
+        });
     }
     private void BuildAuthoringPage()
     {
