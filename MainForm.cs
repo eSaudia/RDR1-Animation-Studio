@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using RDR1AnimationStudio.Core;
 
@@ -193,6 +194,7 @@ internal sealed class MainForm : Form
             var decode = Button("◈ Decode resource semantics…", async (_, _) => await DecodeResourceAsync()); decode.Dock = DockStyle.Bottom; infoPage.Controls.Add(decode);
             var vmIndex = Button("▣ Build VM header index…", async (_, _) => await BuildVmIndexAsync()); vmIndex.Dock = DockStyle.Bottom; infoPage.Controls.Add(vmIndex);
             var importNative = Button("⌘ Import native database…", async (_, _) => await ImportNativeDatabaseAsync()); importNative.Dock = DockStyle.Bottom; infoPage.Controls.Add(importNative);
+            var usage = Button("▤ Explore native usage…", async (_, _) => await ExploreNativeUsageAsync()); usage.Dock = DockStyle.Bottom; infoPage.Controls.Add(usage);
         }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -299,6 +301,59 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) { MessageBox.Show(this, "Could not import native database:\n" + ex.Message, "Native database", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         await Task.CompletedTask;
+    }
+    private sealed record NativeUsageRow(string Hash, string Name, int Count, int NativeIndex);
+    private async Task ExploreNativeUsageAsync()
+    {
+        using var open = new OpenFileDialog { Title = "Open an archive-wide VM index", Filter = "VM index|*.json|All files|*.*", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(open.FileName));
+            if (!document.RootElement.TryGetProperty("nativeUsage", out JsonElement entries) || entries.ValueKind != JsonValueKind.Array)
+                throw new InvalidDataException("This JSON does not contain an archive-wide nativeUsage table. Build a VM header index first.");
+            var rows = entries.EnumerateArray().Select(item => new NativeUsageRow(
+                item.TryGetProperty("hash", out var hash) ? hash.GetString() ?? "" : "",
+                item.TryGetProperty("name", out var name) ? name.GetString() ?? "(unresolved)" : "(unresolved)",
+                item.TryGetProperty("count", out var count) && count.TryGetInt32(out int c) ? c : 0,
+                item.TryGetProperty("nativeIndex", out var index) && index.TryGetInt32(out int i) ? i : -1))
+                .Where(row => row.Hash.Length > 0).OrderByDescending(row => row.Count).ThenBy(row => row.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            using var dialog = new Form { Text = "RDR1 Native Usage Explorer", Size = new Size(920, 620), MinimumSize = new Size(720, 420), StartPosition = FormStartPosition.CenterParent };
+            var filter = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Filter by hash or native name…", Height = 32, Margin = new Padding(8) };
+            var table = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, RowHeadersVisible = false, AutoGenerateColumns = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, SelectionMode = DataGridViewSelectionMode.FullRowSelect };
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Hash", DataPropertyName = "Hash", FillWeight = 24 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Native name", DataPropertyName = "Name", FillWeight = 44 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Calls", DataPropertyName = "Count", FillWeight = 12 });
+            table.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Index", DataPropertyName = "NativeIndex", FillWeight = 12 });
+            var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 6, 8, 0) };
+            var export = Button("↗ Export CSV…", (_, _) =>
+            {
+                using var save = new SaveFileDialog { Title = "Export native usage", Filter = "CSV file|*.csv", FileName = "rdr1-native-usage.csv", AddExtension = true, OverwritePrompt = true };
+                if (save.ShowDialog(dialog) != DialogResult.OK) return;
+                var visible = ((IEnumerable<NativeUsageRow>)table.DataSource!).ToList();
+                var csv = new StringBuilder("Hash,Native name,Calls,Index\r\n");
+                foreach (var row in visible) csv.AppendLine(string.Join(",", Csv(row.Hash), Csv(row.Name), row.Count, row.NativeIndex));
+                File.WriteAllText(save.FileName, csv.ToString(), new UTF8Encoding(false));
+                status.Text = "Native usage CSV written · " + Path.GetFileName(save.FileName);
+            });
+            var close = Button("× Close", (_, _) => dialog.Close()); footer.Controls.Add(close); footer.Controls.Add(export);
+            void ApplyFilter()
+            {
+                string query = filter.Text.Trim();
+                table.DataSource = rows.Where(row => query.Length == 0 || row.Hash.Contains(query, StringComparison.OrdinalIgnoreCase) || row.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+            }
+            filter.TextChanged += (_, _) => ApplyFilter(); ApplyFilter();
+            dialog.Controls.Add(table); dialog.Controls.Add(filter); dialog.Controls.Add(footer); ThemeDialog(dialog);
+            dialog.ShowDialog(this);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Could not open VM index:\n" + ex.Message, "Native usage", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+    private static string Csv(string value) => "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+    private void ThemeDialog(Form dialog)
+    {
+        Color bg = dark ? Color.FromArgb(19, 23, 30) : Color.FromArgb(244, 246, 249), fg = dark ? Color.FromArgb(225, 231, 239) : Color.FromArgb(26, 32, 43);
+        dialog.BackColor = bg; dialog.ForeColor = fg;
+        foreach (Control child in dialog.Controls) { child.BackColor = child is Button ? (dark ? Color.FromArgb(37, 47, 61) : Color.FromArgb(220, 230, 241)) : bg; child.ForeColor = fg; }
     }
     private void BuildAuthoringPage()
     {

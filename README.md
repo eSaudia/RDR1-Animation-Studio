@@ -141,6 +141,10 @@ index aggregates those usage counts across all mission resources. These are
 evidence links and call-site references; they do not claim that unresolved branch
 or event payload semantics have been fully decompiled.
 
+The Scan report's **Explore native usage…** action opens an archive-wide index,
+filters by hash or resolved name, and exports the visible table as CSV. This makes
+large mission scans practical to review without opening the raw JSON manually.
+
 After a game-folder scan, **Build VM header index…** extracts the identified
 mission resources to a temporary workspace, expands supported RSC/Zstandard
 payloads, and writes one archive-wide `rdr1-mission-vm-index.json`. The temporary
