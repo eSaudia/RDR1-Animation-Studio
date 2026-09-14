@@ -124,7 +124,9 @@ RDR1AnimationStudio.exe --decode-resource extracted-resource.bin report.semantic
 Validated `camera.rpf` entries that contain XML are decoded into typed elements
 and attributes (booleans, integers, floats, references). Validated `RBF0`
 cutscene resources are indexed by class, object type, camera/actor/prop/audio/
-effect/subtitle labels, event-record count, and source byte offset. RSC wrappers,
+effect/subtitle labels, event-record count, and source byte offset. Expanded RSC
+mission payloads also include candidate image-base pointers and a raw word-opcode
+histogram for reverse-engineering comparison. RSC wrappers,
 Zstandard frames, and unknown streams are identified without pretending their
 payload has been decoded. Mission VM opcodes, event timing payloads, camera
 transform records, AI task arguments, and audio-bank codecs remain explicitly

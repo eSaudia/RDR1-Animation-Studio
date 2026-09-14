@@ -141,10 +141,21 @@ def decode(data: bytes) -> dict[str, Any]:
         return result
     found = strings(data)
     identifiers = [item for item in found if re.fullmatch(r"[A-Za-z][A-Za-z0-9_:.]{2,}", item["value"])]
+    pointers = []
+    for offset in range(0, min(len(data), 0x800) - 3, 4):
+        value = int.from_bytes(data[offset:offset + 4], "little")
+        target = value - 0x50000000
+        if 0 <= target < len(data):
+            pointers.append({"offset": offset, "raw": f"0x{value:08X}", "target": target})
+    histogram: dict[str, int] = {}
+    for offset in range(0, len(data) - 3, 4):
+        opcode = data[offset]
+        histogram[f"0x{opcode:02X}"] = histogram.get(f"0x{opcode:02X}", 0) + 1
     return {
         "format": "raw", "confidence": "verified byte stream and printable identifiers only", "size": len(data),
         "strings": found, "semanticCounts": {"identifiers": len(identifiers), "animationIdentifiers": sum("_" in item["value"] and any(item["value"].lower().startswith(prefix) for prefix in ("air_", "grd_", "gent_", "gped_", "zomb_")) for item in identifiers)},
         "identifiers": identifiers,
+        "vmEvidence": {"imageBase": "0x50000000 (candidate)", "headerPointers": pointers, "wordOpcodeHistogram": dict(sorted(histogram.items(), key=lambda pair: (-pair[1], pair[0]))[:64])},
         "unresolved": ["mission VM opcode semantics and typed arguments require an independently validated opcode table"]
     }
 
