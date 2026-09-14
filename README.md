@@ -126,10 +126,16 @@ and attributes (booleans, integers, floats, references). Validated `RBF0`
 cutscene resources are indexed by class, object type, camera/actor/prop/audio/
 effect/subtitle labels, event-record count, and source byte offset. Expanded RSC
 mission payloads also include candidate image-base pointers and a raw word-opcode
-histogram for reverse-engineering comparison. RSC wrappers,
-Zstandard frames, and unknown streams are identified without pretending their
-payload has been decoded. Mission VM opcodes, event timing payloads, camera
-transform records, AI task arguments, and audio-bank codecs remain explicitly
+histogram for reverse-engineering comparison. When a payload contains the
+validated RDR script header, the report adds a bounded VM disassembly: opcode byte,
+instruction offset, raw bytes, validated argument width, and control-flow target
+where the format is known. The opcode names and size rules are cross-checked
+against the public RDR backend in [RASM](https://github.com/NativeFunction/RASM).
+Generic RSC objects are deliberately not disassembled merely because they contain
+relative pointers; they remain evidence-only until a script header is found. RSC
+wrappers, Zstandard frames, and unknown streams are identified without pretending
+their payload has been decoded. Native hash/name resolution, event timing payloads,
+camera transform records, AI task arguments, and audio-bank codecs remain explicitly
 marked unresolved until their layouts are independently validated.
 
 ## Requirements / build
