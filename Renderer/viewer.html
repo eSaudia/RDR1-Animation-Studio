@@ -87,7 +87,13 @@
       grid.position.y=box.min.y;
     }
 
-    new GLTFLoader().load('https://model.local/' + encodeURIComponent(params.get('model')), gltf => {
+    const loader = new GLTFLoader();
+    function loadError(error) {
+      const detail = error?.message || String(error);
+      document.getElementById('loading').textContent='Could not load 3D model: '+detail;
+      chrome.webview?.postMessage(JSON.stringify({type:'error',message:detail}));
+    }
+    function showModel(gltf) {
       scene.add(gltf.scene);
       gltf.scene.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
       frameObject(gltf.scene);
@@ -100,10 +106,24 @@
       let meshes=0; gltf.scene.traverse(o=>{ if(o.isSkinnedMesh) meshes++; });
       window.previewStats = () => ({time:active?.time, meshes, animations:gltf.animations.length});
       chrome.webview?.postMessage(JSON.stringify({type:'ready',animations:gltf.animations.length,meshes}));
-    },undefined,error=>{
-      document.getElementById('loading').textContent='Could not load 3D model: '+error.message;
-      chrome.webview?.postMessage(JSON.stringify({type:'error',message:error.message}));
-    });
+    }
+    function fromBase64(value) {
+      const binary=atob(value), bytes=new Uint8Array(binary.length);
+      for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+    if (window.chrome?.webview) {
+      chrome.webview.addEventListener('message', event => {
+        try {
+          const message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+          if (message.type === 'model-data') loader.parse(fromBase64(message.data), '', showModel, loadError);
+          else if (message.type === 'error') loadError(message.message);
+        } catch (error) { loadError(error); }
+      });
+      chrome.webview.postMessage(JSON.stringify({type:'request-model'}));
+    } else {
+      loader.load('https://model.local/' + encodeURIComponent(params.get('model')), showModel, undefined, loadError);
+    }
 
     document.getElementById('play').onclick=()=>{ playing=!playing; if(active) active.paused=!playing; document.getElementById('play').textContent=playing?'Pause':'Play'; };
     document.getElementById('speed').onchange=e=>{ if(mixer) mixer.timeScale=Number(e.target.value); };
