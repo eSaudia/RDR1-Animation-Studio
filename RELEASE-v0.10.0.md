@@ -18,3 +18,4 @@ The v0.10 character path is a preview milestone. Blender export remains skeleton
 - `dotnet build -c Release --no-restore`
 - WFT geometry and glTF merge tests: 3 passed.
 - Blender 5.2 conversion smoke test: merged character glTF converted to GLB successfully.
+- Preview GLB smoke test: armature, skin, and one animation are retained (121 nodes, 1 skin, 1 action).

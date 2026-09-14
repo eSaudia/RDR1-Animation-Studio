@@ -14,6 +14,10 @@ if not meshes:
 bpy.ops.object.select_all(action='DESELECT')
 for o in [rig] + meshes:
     o.hide_set(False)
+    # The bundled base blend hides the armature at the object level.  Clearing
+    # only the view-layer flag still makes Blender omit the rig from glTF.
+    o.hide_viewport = False
+    o.hide_render = False
     o.select_set(True)
 bpy.context.view_layer.objects.active = rig
 bpy.ops.export_scene.gltf(filepath=output, export_format='GLB', use_selection=True,
