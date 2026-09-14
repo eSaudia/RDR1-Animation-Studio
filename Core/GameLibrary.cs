@@ -8,7 +8,12 @@ namespace RDR1AnimationStudio.Core;
 internal enum GameAssetKind
 {
     AnimationSet,
-    Character
+    Character,
+    MissionScript,
+    Camera,
+    Prop,
+    AiData,
+    Audio
 }
 
 internal sealed record GameAsset(
@@ -25,6 +30,11 @@ internal sealed class GameLibrary
     public required IReadOnlyList<string> Archives { get; init; }
     public required IReadOnlyList<GameAsset> AnimationSets { get; init; }
     public required IReadOnlyList<GameAsset> Characters { get; init; }
+    public required IReadOnlyList<GameAsset> MissionScripts { get; init; }
+    public required IReadOnlyList<GameAsset> Cameras { get; init; }
+    public required IReadOnlyList<GameAsset> Props { get; init; }
+    public required IReadOnlyList<GameAsset> AiData { get; init; }
+    public required IReadOnlyList<GameAsset> Audio { get; init; }
     public required IReadOnlyList<string> Errors { get; init; }
 
     public static Task<GameLibrary> ScanAsync(
@@ -48,6 +58,11 @@ internal sealed class GameLibrary
         var cachedArchives = LoadArchiveCache(root, names.Count);
         var animationSets = new ConcurrentBag<GameAsset>();
         var characters = new ConcurrentBag<GameAsset>();
+        var missionScripts = new ConcurrentBag<GameAsset>();
+        var cameras = new ConcurrentBag<GameAsset>();
+        var props = new ConcurrentBag<GameAsset>();
+        var aiData = new ConcurrentBag<GameAsset>();
+        var audio = new ConcurrentBag<GameAsset>();
         var errors = new ConcurrentBag<string>();
         var archiveResults = new ConcurrentDictionary<string, ArchiveCache>(StringComparer.OrdinalIgnoreCase);
         int completed = 0;
@@ -66,8 +81,7 @@ internal sealed class GameLibrary
                 {
                     foreach (GameAsset asset in saved.Assets)
                     {
-                        if (asset.Kind == GameAssetKind.AnimationSet) animationSets.Add(asset);
-                        else characters.Add(asset);
+                        AddAsset(asset, animationSets, characters, missionScripts, cameras, props, aiData, audio);
                     }
                     foreach (string error in saved.Errors) errors.Add(error);
                     archiveResults[archivePath] = saved;
@@ -77,17 +91,16 @@ internal sealed class GameLibrary
                 {
                 using Rpf6Archive archive = Rpf6Archive.Open(archivePath, names);
                 var found = new List<GameAsset>();
-                foreach (Rpf6Archive.Entry entry in archive.Entries)
+                    foreach (Rpf6Archive.Entry entry in archive.Entries)
                 {
                     if (entry.IsDirectory) continue;
-                    GameAssetKind? kind = Classify(entry.Name);
+                    GameAssetKind? kind = Classify(entry.Name, entry.Path);
                     if (kind is null && entry.IsResource && entry.ResourceType == 6)
                         kind = GameAssetKind.AnimationSet;
                     if (kind is null) continue;
                     var asset = new GameAsset(kind.Value, entry.Name, archivePath, entry.Path, entry.Index, entry.Size);
                     found.Add(asset);
-                    if (kind == GameAssetKind.AnimationSet) animationSets.Add(asset);
-                    else characters.Add(asset);
+                    AddAsset(asset, animationSets, characters, missionScripts, cameras, props, aiData, audio);
                 }
                 archiveResults[archivePath] = new ArchiveCache(archivePath, info.Length, info.LastWriteTimeUtc.Ticks, found, []);
                 }
@@ -113,6 +126,11 @@ internal sealed class GameLibrary
             Archives = archivePaths,
             AnimationSets = animationSets.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
             Characters = characters.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+            MissionScripts = missionScripts.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+            Cameras = cameras.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+            Props = props.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+            AiData = aiData.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+            Audio = audio.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
             Errors = errors.Order().ToArray()
         };
     }
@@ -125,9 +143,32 @@ internal sealed class GameLibrary
         List<string> Errors);
 
     private sealed record ScanCache(
+        int Version,
         string Root,
         int NameCount,
         List<ArchiveCache> Archives);
+
+    private static void AddAsset(
+        GameAsset asset,
+        ConcurrentBag<GameAsset> animationSets,
+        ConcurrentBag<GameAsset> characters,
+        ConcurrentBag<GameAsset> missionScripts,
+        ConcurrentBag<GameAsset> cameras,
+        ConcurrentBag<GameAsset> props,
+        ConcurrentBag<GameAsset> aiData,
+        ConcurrentBag<GameAsset> audio)
+    {
+        switch (asset.Kind)
+        {
+            case GameAssetKind.AnimationSet: animationSets.Add(asset); break;
+            case GameAssetKind.Character: characters.Add(asset); break;
+            case GameAssetKind.MissionScript: missionScripts.Add(asset); break;
+            case GameAssetKind.Camera: cameras.Add(asset); break;
+            case GameAssetKind.Prop: props.Add(asset); break;
+            case GameAssetKind.AiData: aiData.Add(asset); break;
+            case GameAssetKind.Audio: audio.Add(asset); break;
+        }
+    }
 
     private static Dictionary<string, ArchiveCache> LoadArchiveCache(string root, int nameCount)
     {
@@ -136,7 +177,7 @@ internal sealed class GameLibrary
             string path = CachePath(root);
             if (!File.Exists(path)) return new(StringComparer.OrdinalIgnoreCase);
             ScanCache? cache = JsonSerializer.Deserialize<ScanCache>(File.ReadAllText(path));
-            if (cache is null || !string.Equals(cache.Root, root, StringComparison.OrdinalIgnoreCase) || cache.NameCount != nameCount)
+            if (cache is null || cache.Version != 1 || !string.Equals(cache.Root, root, StringComparison.OrdinalIgnoreCase) || cache.NameCount != nameCount)
                 return new(StringComparer.OrdinalIgnoreCase);
             return cache.Archives.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         }
@@ -150,7 +191,7 @@ internal sealed class GameLibrary
             string path = CachePath(root);
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
             string temp = path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(new ScanCache(root, nameCount, archives.OrderBy(a => a.Path, StringComparer.OrdinalIgnoreCase).ToList())));
+            File.WriteAllText(temp, JsonSerializer.Serialize(new ScanCache(1, root, nameCount, archives.OrderBy(a => a.Path, StringComparer.OrdinalIgnoreCase).ToList())));
             File.Move(temp, path, true);
         }
         catch { /* A cache must never make game scanning fail. */ }
@@ -170,14 +211,26 @@ internal sealed class GameLibrary
         return archive.Extract(archive.Entries[asset.EntryIndex]);
     }
 
-    private static GameAssetKind? Classify(string name)
+    private static GameAssetKind? Classify(string name, string path)
     {
         string extension = Path.GetExtension(name).ToLowerInvariant();
-        return extension switch {
+        GameAssetKind? byExtension = extension switch {
             ".was" => GameAssetKind.AnimationSet,
             // WFT is the skinned fragment model. WPDT/WFD companions are not independently previewable.
             ".wft" => GameAssetKind.Character,
+            ".xsc" or ".csc" or ".ysc" or ".scr" => GameAssetKind.MissionScript,
+            ".awc" or ".rel" or ".xma" or ".xwb" or ".wav" => GameAssetKind.Audio,
+            ".wdr" or ".wbn" or ".wbd" or ".wpl" or ".ymap" or ".ydr" or ".ybn" => GameAssetKind.Prop,
+            ".nav" or ".ait" or ".ai" => GameAssetKind.AiData,
+            ".cam" or ".cut" or ".cin" => GameAssetKind.Camera,
             _ => null
         };
+        if (byExtension is not null) return byExtension;
+        string haystack = (name + "/" + path).ToLowerInvariant();
+        if (haystack.Contains("camera") || haystack.Contains("cutscene") || haystack.Contains("cinematic")) return GameAssetKind.Camera;
+        if (haystack.Contains("audio") || haystack.Contains("sound") || haystack.Contains("voice") || haystack.Contains("music")) return GameAssetKind.Audio;
+        if (haystack.Contains("scenario") || haystack.Contains("behavior") || haystack.Contains("behaviour") || haystack.Contains("task") || haystack.Contains("navigation")) return GameAssetKind.AiData;
+        if (haystack.Contains("mission") || haystack.Contains("script") || haystack.Contains("sequence")) return GameAssetKind.MissionScript;
+        return null;
     }
 }

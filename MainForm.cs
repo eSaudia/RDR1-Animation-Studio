@@ -33,6 +33,7 @@ internal sealed class MainForm : Form
     private readonly List<SourceFile> sources = [];
     private readonly List<string> problems = [];
     private readonly List<CharacterChoice> characters = [];
+    private GameLibrary? gameLibrary;
     private IReadOnlyDictionary<uint, string> archiveNames = new Dictionary<uint, string>();
     private bool dark = true, busy, ascending = true;
     private CancellationTokenSource? operation;
@@ -178,7 +179,17 @@ internal sealed class MainForm : Form
         libraryPage.Visible = page == "Library"; scenePage.Visible = page == "Scenes"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !scenePage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
         if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.10 · Animation Lab\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
-        else if (page == "Scan report") info.Text = "SCAN REPORT\n\n" + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
+        else if (page == "Scan report") {
+            string inventory = gameLibrary is null ? "No game folder scanned yet." :
+                $"Mission resource inventory (identified, not decoded):\n" +
+                $"  Scripts: {gameLibrary.MissionScripts.Count:N0}\n" +
+                $"  Cameras: {gameLibrary.Cameras.Count:N0}\n" +
+                $"  Props: {gameLibrary.Props.Count:N0}\n" +
+                $"  AI data: {gameLibrary.AiData.Count:N0}\n" +
+                $"  Audio: {gameLibrary.Audio.Count:N0}\n\n" +
+                "These counts are a safe inventory only; binary mission decoding is not silently substituted.\n\n";
+            info.Text = "SCAN REPORT\n\n" + inventory + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
+        }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
             var b = Button("↥ Import edited Blender animation…", async (_, _) => await ImportAsync()); b.Dock = DockStyle.Bottom; infoPage.Controls.Add(b);
@@ -353,7 +364,7 @@ internal sealed class MainForm : Form
             var path = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt"); var names = File.Exists(path) ? Rpf6Archive.LoadNames(path) : new Dictionary<uint, string>();
             archiveNames = names;
             IProgress<string> progress = new Progress<string>(s => status.Text = s);
-            var game = await GameLibrary.ScanAsync(dialog.SelectedPath, names, progress, token); var input = new List<SourceFile>();
+            var game = await GameLibrary.ScanAsync(dialog.SelectedPath, names, progress, token); gameLibrary = game; var input = new List<SourceFile>();
             string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Library"); Directory.CreateDirectory(cache);
             var errors = new List<string>(game.Errors);
             string collectionCache = CollectionCachePath(dialog.SelectedPath);
@@ -379,7 +390,7 @@ internal sealed class MainForm : Form
             }
             await IndexAsync(input, token); problems.AddRange(errors);
             SetCharacters(game.Characters);
-            status.Text = $"Collection complete · {input.Count:N0} animation sets · {characters.Count:N0} preview characters.";
+            status.Text = $"Collection complete · {input.Count:N0} animation sets · mission inventory: {game.MissionScripts.Count:N0} scripts, {game.Cameras.Count:N0} cameras, {game.Props.Count:N0} props, {game.AiData.Count:N0} AI, {game.Audio.Count:N0} audio.";
         });
     }
     private async Task AddWasAsync() {
