@@ -17,12 +17,17 @@ internal sealed class MainForm : Form
     private readonly ComboBox character = new() { Width = 280, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly DataGridView grid = new() { Dock = DockStyle.Fill, AutoGenerateColumns = false, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, MultiSelect = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect, BorderStyle = BorderStyle.None, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
     private readonly Panel libraryPage = new() { Dock = DockStyle.Fill };
+    private readonly Panel packPage = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly Panel infoPage = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly RichTextBox info = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 12) };
+    private readonly RichTextBox packInfo = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 12) };
     private readonly TextBox authorName = new() { Width = 260, Text = "custom_action" };
     private readonly NumericUpDown authorFrames = new() { Width = 90, Minimum = 2, Maximum = 10000, Value = 90 };
     private readonly NumericUpDown authorFps = new() { Width = 90, Minimum = 1, Maximum = 240, Value = 30 };
     private readonly ComboBox authorPreset = new() { Width = 220, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox packName = new() { Width = 260, Text = "My RDR1 Animation Pack" };
+    private readonly ComboBox packCharacter = new() { Width = 280, DropDownStyle = ComboBoxStyle.DropDownList };
+    private string? lastPackFolder;
     private readonly List<Clip> clips = [];
     private readonly List<SourceFile> sources = [];
     private readonly List<string> problems = [];
@@ -58,7 +63,7 @@ internal sealed class MainForm : Form
         authorPreset.Items.AddRange(["Blank authoring pose", "Spider leap (demo)"]); authorPreset.SelectedIndex = 0;
         var nav = new FlowLayoutPanel { Dock = DockStyle.Left, Width = 205, Padding = new Padding(18, 25, 5, 0), FlowDirection = FlowDirection.TopDown, WrapContents = false };
         nav.Controls.Add(new Label { Text = "RDR1\nANIMATION\nSTUDIO", Size = new Size(175, 125), Font = new Font("Segoe UI", 20, FontStyle.Bold) });
-        foreach (var (icon, name) in new[] { ("▦", "Library"), ("✦", "Authoring"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
+        foreach (var (icon, name) in new[] { ("▦", "Library"), ("✦", "Authoring"), ("◈", "Packs"), ("↥", "Import"), ("≡", "Scan report"), ("ⓘ", "About") }) {
             var button = Button(icon + "   " + name, (_, _) => ShowPage(name)); button.Size = new Size(172, 48); button.AutoSize = false; button.TextAlign = ContentAlignment.MiddleLeft; nav.Controls.Add(button);
         }
         nav.Controls.Add(new Label { Text = "CREATED BY\neSaudia", Size = new Size(170, 60), Margin = new Padding(4, 80, 0, 0), Font = new Font("Segoe UI", 11, FontStyle.Bold) });
@@ -95,7 +100,8 @@ internal sealed class MainForm : Form
         split.Panel1.Controls.Add(grid); split.Panel2.Controls.Add(preview);
         libraryPage.Controls.Add(split); libraryPage.Controls.Add(filters); libraryPage.Controls.Add(actions);
         infoPage.Controls.Add(info);
-        body.Controls.Add(libraryPage); body.Controls.Add(infoPage); body.Controls.Add(summary); body.Controls.Add(top);
+        BuildPackPage();
+        body.Controls.Add(libraryPage); body.Controls.Add(packPage); body.Controls.Add(infoPage); body.Controls.Add(summary); body.Controls.Add(top);
         Controls.Add(body); Controls.Add(nav); Controls.Add(status);
         FormClosing += (_, e) => { if (busy) { operation?.Cancel(); e.Cancel = true; status.Text = "Cancelling… close again when stopped."; } };
         Theme();
@@ -141,6 +147,9 @@ internal sealed class MainForm : Form
         if (bundled >= 0) character.SelectedIndex = bundled;
         character.AccessibleName = "Preview character";
         character.AccessibleDescription = "Choose the character mesh used for the animation preview";
+        packCharacter.Items.Clear();
+        foreach (var item in characters) packCharacter.Items.Add(item);
+        packCharacter.SelectedIndex = bundled >= 0 ? bundled : (packCharacter.Items.Count > 0 ? 0 : -1);
     }
     private CharacterChoice SelectedCharacter => character.SelectedItem as CharacterChoice ?? characters[0];
     internal void SaveSnapshot(string output, string? catalogPath)
@@ -162,7 +171,7 @@ internal sealed class MainForm : Form
     }
     private void ShowPage(string page) {
         title.Text = page == "Library" ? "Animation library" : page;
-        libraryPage.Visible = page == "Library"; infoPage.Visible = !libraryPage.Visible;
+        libraryPage.Visible = page == "Library"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
         if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.10 · Animation Lab\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") info.Text = "SCAN REPORT\n\n" + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
@@ -201,6 +210,70 @@ internal sealed class MainForm : Form
             if (MessageBox.Show(this, "Authoring scene created. Open it in Blender now?", "Custom authoring", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
         });
+    }
+    private void BuildPackPage()
+    {
+        packInfo.Text = "CUSTOM ANIMATION PACKS\n\nCreate a portable, loader-ready pack from the clips selected in Library. Each source WAS is copied once, while the manifest keeps the exact animation name, record offset, character target, frame count and FPS.\n\nThis does not overwrite animationres.rpf. The manifest is the contract a future ScriptHookRDR animation menu can read; the game will not load a loose JSON/WAS folder by itself until that runtime plugin exists.\n\nUse supported clips only. For a new custom motion, first edit an existing exported clip in Blender and import it as a new WAS, then package that result here.";
+        var panel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 170, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
+        panel.Controls.Add(new Label { Text = "Pack name", AutoSize = true, Padding = new Padding(0, 7, 6, 0) }); panel.Controls.Add(packName);
+        panel.Controls.Add(new Label { Text = "Target character", AutoSize = true, Padding = new Padding(16, 7, 6, 0) }); panel.Controls.Add(packCharacter);
+        var create = Button("◈ Create pack from selected clips…", async (_, _) => await CreatePackAsync()); create.Width = 270; panel.Controls.Add(create);
+        var validate = Button("✓ Validate pack manifest…", async (_, _) => await ValidatePackAsync()); validate.Width = 230; panel.Controls.Add(validate);
+        var open = Button("▣ Open last pack folder", (_, _) => OpenLastPack()); open.Width = 210; panel.Controls.Add(open);
+        panel.Controls.Add(new Label { Text = "Select clips in Library first; duplicate WAS sources are stored only once.", AutoSize = true, Padding = new Padding(0, 14, 0, 0) });
+        packPage.Controls.Add(packInfo); packPage.Controls.Add(panel);
+    }
+    private async Task CreatePackAsync()
+    {
+        if (busy) return;
+        var selected = grid.SelectedRows.Cast<DataGridViewRow>().Select(r => r.DataBoundItem as Clip).Where(c => c is not null).Cast<Clip>().Where(c => c.Status == "Supported").DistinctBy(c => c.Identity).ToList();
+        if (selected.Count == 0) { MessageBox.Show(this, "Select at least one supported clip in Library first.", "Create animation pack"); return; }
+        string name = packName.Text.Trim();
+        foreach (char invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
+        name = name.Trim().TrimEnd('.');
+        if (name.Length == 0) { MessageBox.Show(this, "Enter a valid pack name.", "Create animation pack"); return; }
+        using var dialog = new FolderBrowserDialog { Description = "Choose where to create the animation pack", UseDescriptionForTitle = true };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token => {
+            string root = Path.Combine(dialog.SelectedPath, name + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            string sourceFolder = Path.Combine(root, "sources"); Directory.CreateDirectory(sourceFolder);
+            var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var entries = new List<object>();
+            foreach (Clip clip in selected) {
+                token.ThrowIfCancellationRequested();
+                string source = Path.GetFullPath(clip.Source);
+                if (!File.Exists(source)) throw new FileNotFoundException("A selected WAS source is missing.", source);
+                byte[] bytes = await File.ReadAllBytesAsync(source, token); string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                string relative = "sources/" + hash + ".was"; string destination = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+                if (!files.ContainsKey(hash)) { await File.WriteAllBytesAsync(destination, bytes, token); files[hash] = relative; }
+                entries.Add(new { id = clip.Name + "_0x" + clip.Offset.ToString("X"), displayName = clip.DisplayName, sourceSet = clip.Set, source = files[hash], recordOffset = clip.Offset, frames = clip.Frames, fps = clip.Fps, seconds = clip.Duration, status = clip.Status });
+            }
+            var manifest = new { format = "rdr1-animation-pack-v1", game = "Red Dead Redemption", name, character = packCharacter.SelectedItem?.ToString() ?? "John · bundled human rig", createdUtc = DateTime.UtcNow, entryCount = entries.Count, sourceCount = files.Count, entries, loader = new { status = "staged-only", note = "Requires a ScriptHookRDR runtime animation menu and a validated WAS installation path." } };
+            await File.WriteAllTextAsync(Path.Combine(root, "manifest.json"), JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }), token);
+            await File.WriteAllTextAsync(Path.Combine(root, "README.txt"), "RDR1 Animation Studio custom animation pack\r\n\r\nThis pack contains deduplicated WAS sources and manifest metadata. It is staged for a runtime loader; it does not modify the game archive automatically.\r\nBack up animationres.rpf before any manual installation.\r\n", token);
+            lastPackFolder = root; status.Text = $"Pack created · {entries.Count:N0} clips · {files.Count:N0} WAS sources";
+            MessageBox.Show(this, "Pack created:\n\n" + root + "\n\nIt contains manifest.json, README.txt and a deduplicated sources folder.", "Animation pack complete");
+        });
+    }
+    private async Task ValidatePackAsync()
+    {
+        using var dialog = new OpenFileDialog { Title = "Select an animation pack manifest", Filter = "Pack manifest|manifest.json|JSON|*.json" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try {
+            using var document = JsonDocument.Parse(await File.ReadAllTextAsync(dialog.FileName)); var root = document.RootElement;
+            if (!root.TryGetProperty("format", out var format) || format.GetString() != "rdr1-animation-pack-v1") throw new InvalidDataException("Unknown pack format.");
+            if (!root.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) throw new InvalidDataException("The pack has no entries array.");
+            int missing = 0, total = 0; string folder = Path.GetDirectoryName(dialog.FileName)!;
+            foreach (var entry in entries.EnumerateArray()) {
+                total++; string relative = entry.GetProperty("source").GetString() ?? ""; string combined = Path.GetFullPath(Path.Combine(folder, relative.Replace('/', Path.DirectorySeparatorChar)));
+                if (Path.IsPathRooted(relative) || relative.Contains("..", StringComparison.Ordinal) || !combined.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !File.Exists(combined)) missing++;
+            }
+            MessageBox.Show(this, missing == 0 ? $"Pack is valid.\n\n{total:N0} animation entries have available WAS sources." : $"Pack validation failed.\n\nMissing or unsafe sources: {missing:N0} of {total:N0}.", "Pack validation", MessageBoxButtons.OK, missing == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        } catch (Exception ex) { MessageBox.Show(this, "Invalid pack manifest:\n" + ex.Message, "Pack validation", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+    private void OpenLastPack()
+    {
+        if (lastPackFolder is null || !Directory.Exists(lastPackFolder)) { MessageBox.Show(this, "Create a pack first.", "Animation packs"); return; }
+        Process.Start(new ProcessStartInfo("explorer.exe", lastPackFolder) { UseShellExecute = true });
     }
     private void RefreshGrid() {
         var selected = grid.SelectedRows.Cast<DataGridViewRow>().Select(r => (r.DataBoundItem as Clip)?.Identity).ToHashSet(); string query = search.Text.Trim();
