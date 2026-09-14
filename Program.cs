@@ -62,7 +62,7 @@ internal static class Program
             string bundledNames = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt");
             Dictionary<uint, string> names = File.Exists(bundledNames) ? Rpf6Archive.LoadNames(bundledNames) : [];
             GameLibrary library = GameLibrary.ScanAsync(args[1], names).GetAwaiter().GetResult();
-            Console.WriteLine($"archives={library.Archives.Count} characters={library.Characters.Count} animations={library.AnimationSets.Count} errors={library.Errors.Count}");
+            Console.WriteLine($"archives={library.Archives.Count} characters={library.Characters.Count} animations={library.AnimationSets.Count} scripts={library.MissionScripts.Count} cameras={library.Cameras.Count} props={library.Props.Count} ai={library.AiData.Count} audio={library.Audio.Count} errors={library.Errors.Count}");
             foreach (GameAsset character in library.Characters
                 .Where(asset => asset.Name.Contains("john", StringComparison.OrdinalIgnoreCase) ||
                                 asset.Name.Contains("jack", StringComparison.OrdinalIgnoreCase))
