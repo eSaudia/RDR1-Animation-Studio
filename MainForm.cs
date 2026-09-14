@@ -315,11 +315,21 @@ internal sealed class MainForm : Form
         await p.WaitForExitAsync(token); string error = await errors; if (p.ExitCode != 0) throw new InvalidOperationException(error + "\n" + output);
     }
     internal static string? FindWorkingPython() {
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string root in new[] { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "codex-runtimes"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python") })
-            if (Directory.Exists(root)) foreach (string path in Directory.EnumerateFiles(root, "python.exe", SearchOption.AllDirectories)) { try {
-                using var p = Process.Start(new ProcessStartInfo(path, "--version") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
-                if (p is not null && p.WaitForExit(3000) && p.StandardOutput.ReadToEnd().StartsWith("Python 3.12")) return path;
-            } catch { } }
+            if (Directory.Exists(root)) foreach (string path in Directory.EnumerateFiles(root, "python.exe", SearchOption.AllDirectories)) candidates.Add(path);
+        string? pathEnvironment = Environment.GetEnvironmentVariable("PATH");
+        if (pathEnvironment is not null) foreach (string directory in pathEnvironment.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) {
+            string path = Path.Combine(directory.Trim(), "python.exe");
+            if (File.Exists(path)) candidates.Add(path);
+        }
+        foreach (string path in candidates) { try {
+            using var p = Process.Start(new ProcessStartInfo(path, "--version") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
+            if (p is not null && p.WaitForExit(3000)) {
+                string version = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                if (version.Contains("Python 3.12", StringComparison.OrdinalIgnoreCase)) return path;
+            }
+        } catch { } }
         return null;
     }
 }
