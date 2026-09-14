@@ -1,6 +1,6 @@
 ![RDR1 Animation Studio](Assets/release-banner.png)
 
-# RDR1 Animation Studio 0.9
+# RDR1 Animation Studio 0.10 · Animation Lab
 
 Created by **eSaudia — Creator & Project Owner**.
 
@@ -30,6 +30,8 @@ demo below shows the exported animation workflow and playback timing.
 - Show internal clip names, frame counts, FPS, source archive, and support status.
 - Detect identical decoded motion without hiding clips merely because their names match.
 - Export selected clips or all clips from a WAS set to Blender-compatible files.
+- Preview supported clips on the bundled John rig or a discovered WFT character mesh.
+- Decode WFT character geometry into a cached, skinned glTF preview without writing to RPF archives.
 - Preserve source IDs and validation metadata for experimental Blender round trips.
 - Provide a dark/light theme and a report when a clip layout is unsupported.
 
@@ -50,6 +52,11 @@ The interface has Library, Import, Scan report, and About sections, custom drawn
 and a top-right Theme switch. Dark is the default. The old renderer and filename-database
 control have been removed. Filename resolution runs automatically internally.
 
+The **Character** picker is populated after a game-folder scan. **John · bundled human rig**
+works without a game model; discovered `.wft` assets are decoded on demand and cached in
+`%LocalAppData%\\RDR1AnimationStudio\\Characters`. WFT meshes must use the bundled player
+skeleton mapping; incompatible or malformed resources are reported in the preview panel.
+
 ## Export to Blender
 
 Select rows using Ctrl/Shift or Select all, then **Export selected**. **Export all** uses
@@ -58,8 +65,10 @@ decoded motion is exported once with aliases in the report. Unsupported clips ar
 reported rather than replaced with another clip or stretched to fit a guessed timeline.
 
 Exports are named Blender Actions on the bundled human skeleton, in files grouped by
-source with at most 50 Actions per file. A matching character mesh is not included in
-this workflow. NLA playback is disabled to prevent interference with the active Action.
+source with at most 50 Actions per file. Character-aware WFT geometry is currently a
+preview feature; Blender export remains deliberately skeleton-first so exported files are
+stable and compatible with the existing round-trip importer. NLA playback is disabled to
+prevent interference with the active Action.
 The output folder includes `export-report.json`, source identities, and glTF files.
 Animations incompatible with the supplied human skeleton are reported as unsupported.
 

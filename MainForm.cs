@@ -14,6 +14,7 @@ internal sealed class MainForm : Form
     private readonly TextBox search = new() { PlaceholderText = "Search animation names or source sets…", Width = 400 };
     private readonly CheckBox unique = new() { Text = "Hide identical motion", Checked = true, AutoSize = true };
     private readonly CheckBox supported = new() { Text = "Supported only", AutoSize = true };
+    private readonly ComboBox character = new() { Width = 280, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly DataGridView grid = new() { Dock = DockStyle.Fill, AutoGenerateColumns = false, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, MultiSelect = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect, BorderStyle = BorderStyle.None, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
     private readonly Panel libraryPage = new() { Dock = DockStyle.Fill };
     private readonly Panel infoPage = new() { Dock = DockStyle.Fill, Visible = false };
@@ -21,6 +22,8 @@ internal sealed class MainForm : Form
     private readonly List<Clip> clips = [];
     private readonly List<SourceFile> sources = [];
     private readonly List<string> problems = [];
+    private readonly List<CharacterChoice> characters = [];
+    private IReadOnlyDictionary<uint, string> archiveNames = new Dictionary<uint, string>();
     private bool dark = true, busy, ascending = true;
     private CancellationTokenSource? operation;
     private string? blender;
@@ -37,6 +40,9 @@ internal sealed class MainForm : Form
         // are real internal clip identifiers; replacing them with a fabricated label
         // made it impossible to match an animation back to the game.
         public string DisplayName => Name;
+    }
+    private sealed record CharacterChoice(string Label, GameAsset? Asset) {
+        public override string ToString() => Label;
     }
     private sealed record Catalog(List<Clip> Clips, List<JsonElement> Errors);
 
@@ -62,8 +68,12 @@ internal sealed class MainForm : Form
         actions.Controls.Add(Button("↗ Export all", async (_, _) => await ExportAsync(true)));
         actions.Controls.Add(Button("× Cancel", (_, _) => operation?.Cancel()));
         var filters = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44 };
-        filters.Controls.Add(new Label { Text = "Search", AutoSize = true, Padding = new Padding(0, 3, 5, 0) }); filters.Controls.Add(search); filters.Controls.Add(unique); filters.Controls.Add(supported);
+        filters.Controls.Add(new Label { Text = "Search", AutoSize = true, Padding = new Padding(0, 3, 5, 0) }); filters.Controls.Add(search);
+        filters.Controls.Add(new Label { Text = "Character", AutoSize = true, Padding = new Padding(14, 3, 5, 0) }); filters.Controls.Add(character);
+        filters.Controls.Add(unique); filters.Controls.Add(supported);
         search.TextChanged += (_, _) => RefreshGrid(); unique.CheckedChanged += (_, _) => RefreshGrid(); supported.CheckedChanged += (_, _) => RefreshGrid();
+        character.SelectedIndexChanged += (_, _) => { previewVersion++; previewTimer.Stop(); previewOperation?.Cancel(); preview.Notice("Select one supported animation to preview."); if (!busy) previewTimer.Start(); };
+        SetCharacters([]);
         foreach (var (name, property, weight) in new[] { ("Animation", "DisplayName", 30), ("Source set", "Set", 25), ("Frames", "Frames", 7), ("FPS", "Fps", 5), ("Seconds", "Duration", 7), ("Status", "Availability", 15) })
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = name, DataPropertyName = property, FillWeight = weight, SortMode = DataGridViewColumnSortMode.Programmatic });
         grid.RowTemplate.Height = 34; grid.ColumnHeadersHeight = 42;
@@ -105,6 +115,28 @@ internal sealed class MainForm : Form
         else { g.DrawEllipse(p,3,3,18,18);g.DrawLine(p,12,10,12,17);g.DrawEllipse(p,11,6,2,2); }
         return image;
     }
+    private void SetCharacters(IEnumerable<GameAsset> discovered)
+    {
+        characters.Clear();
+        characters.Add(new CharacterChoice("John · bundled human rig", null));
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var asset in discovered.Where(a => a.Name.EndsWith(".wft", StringComparison.OrdinalIgnoreCase)))
+        {
+            string shortName = Path.GetFileNameWithoutExtension(asset.Name);
+            if (shortName.Length == 0 || !seen.Add(shortName)) continue;
+            string label = shortName.Replace('_', ' ');
+            characters.Add(new CharacterChoice(label + " · game model", asset));
+        }
+        characters.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Label, b.Label));
+        character.DataSource = null;
+        character.Items.Clear();
+        foreach (var item in characters) character.Items.Add(item);
+        int bundled = characters.FindIndex(item => item.Asset is null);
+        if (bundled >= 0) character.SelectedIndex = bundled;
+        character.AccessibleName = "Preview character";
+        character.AccessibleDescription = "Choose the character mesh used for the animation preview";
+    }
+    private CharacterChoice SelectedCharacter => character.SelectedItem as CharacterChoice ?? characters[0];
     internal void SaveSnapshot(string output, string? catalogPath)
     {
         if (catalogPath is not null) { var c = JsonSerializer.Deserialize<Catalog>(File.ReadAllText(catalogPath)); if (c is not null) clips.AddRange(c.Clips); }
@@ -126,7 +158,7 @@ internal sealed class MainForm : Form
         title.Text = page == "Library" ? "Animation library" : page;
         libraryPage.Visible = page == "Library"; infoPage.Visible = !libraryPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
-        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.8\n\nGame-wide animation discovery, Blender export and experimental WAS import.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
+        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.10 · Animation Lab\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") info.Text = "SCAN REPORT\n\n" + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -152,6 +184,7 @@ internal sealed class MainForm : Form
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token => {
             var path = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt"); var names = File.Exists(path) ? Rpf6Archive.LoadNames(path) : new Dictionary<uint, string>();
+            archiveNames = names;
             IProgress<string> progress = new Progress<string>(s => status.Text = s);
             var game = await GameLibrary.ScanAsync(dialog.SelectedPath, names, progress, token); var input = new List<SourceFile>();
             string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Library"); Directory.CreateDirectory(cache);
@@ -166,6 +199,8 @@ internal sealed class MainForm : Form
                 progress.Report($"Collecting {input.Count:N0}/{game.AnimationSets.Count:N0} animation sets…");
             } }, token);
             await IndexAsync(input, token); problems.AddRange(errors);
+            SetCharacters(game.Characters);
+            status.Text = $"Collection complete · {input.Count:N0} animation sets · {characters.Count:N0} preview characters.";
         });
     }
     private async Task AddWasAsync() {
@@ -197,14 +232,16 @@ internal sealed class MainForm : Form
     {
         if (busy || grid.SelectedRows.Count != 1 || grid.SelectedRows[0].DataBoundItem is not Clip clip) return;
         if (clip.Status != "Supported") { preview.Notice("This clip cannot be decoded reliably yet.\n" + clip.Status); return; }
+        CharacterChoice selectedCharacter = SelectedCharacter;
         string? exe = Blender(); if (exe is null) { preview.Notice("Blender is required to prepare the character preview."); return; }
         int version = previewVersion;
         using var cancellation = new CancellationTokenSource(); previewOperation = cancellation;
         var token = cancellation.Token;
         try {
-            preview.Notice("Preparing John’s character animation…\nFirst preview requires Blender conversion; repeat previews are cached.");
+            preview.Notice("Preparing " + selectedCharacter.Label + "…\nFirst preview requires Blender conversion; repeat previews are cached.");
             string assets = Path.Combine(AppContext.BaseDirectory, "Assets");
-            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("v09-mesh|" + clip.Identity + "|" + clip.Fingerprint)));
+            string characterKey = selectedCharacter.Asset is null ? "john-bundled" : selectedCharacter.Asset.ArchivePath + "|" + selectedCharacter.Asset.InternalPath + "|" + selectedCharacter.Asset.EntryIndex;
+            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("v010-character|" + characterKey + "|" + clip.Identity + "|" + clip.Fingerprint)));
             string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Preview", key);
             Directory.CreateDirectory(folder); string model = Path.Combine(folder, "preview.glb");
             if (!File.Exists(model)) {
@@ -214,16 +251,36 @@ internal sealed class MainForm : Form
                 using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(folder, "export-report.json"), token));
                 string blend = report.RootElement.GetProperty("exported")[0].GetProperty("file").GetString()!;
                 string pending = Path.Combine(folder, "pending.glb");
-                await Execute(exe, ["--background", blend, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_preview_glb.py"), "--", pending], token);
+                if (selectedCharacter.Asset is null)
+                    await Execute(exe, ["--background", blend, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_preview_glb.py"), "--", pending], token);
+                else
+                {
+                    string sourceGltf = Path.ChangeExtension(blend, ".gltf");
+                    if (!File.Exists(sourceGltf)) throw new FileNotFoundException("The animation glTF interchange file was not produced.", sourceGltf);
+                    string geometry = await PrepareCharacterGeometryAsync(selectedCharacter.Asset, token);
+                    string merged = Path.Combine(folder, "character.gltf");
+                    await Python("wft_gltf_merge.py", [sourceGltf, geometry, "--output", merged], token);
+                    await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_gltf_to_glb.py"), "--", merged, pending], token);
+                }
                 token.ThrowIfCancellationRequested(); File.Move(pending, model, true);
             }
             if (version != previewVersion || IsDisposed) return;
-            await preview.LoadModelAsync(model, clip.DisplayName + " · John (human rig)");
+            await preview.LoadModelAsync(model, clip.DisplayName + " · " + selectedCharacter.Label);
             await preview.Loaded.Task.WaitAsync(TimeSpan.FromSeconds(30), token);
-            status.Text = "Source name: " + clip.Name + " · " + clip.Set + " · Mouse drag: orbit, wheel: zoom";
+            status.Text = "Source name: " + clip.Name + " · " + clip.Set + " · Preview: " + selectedCharacter.Label + " · Mouse drag: orbit, wheel: zoom";
         } catch (OperationCanceledException) { }
-        catch (Exception ex) { if (version == previewVersion && !IsDisposed) preview.Notice("Cannot preview this clip on John’s rig.\n" + ex.Message[..Math.Min(ex.Message.Length, 600)]); }
+        catch (Exception ex) { if (version == previewVersion && !IsDisposed) preview.Notice("Cannot preview this clip on " + selectedCharacter.Label + ".\n" + ex.Message[..Math.Min(ex.Message.Length, 600)]); }
         finally { if (ReferenceEquals(previewOperation, cancellation)) previewOperation = null; }
+    }
+    private async Task<string> PrepareCharacterGeometryAsync(GameAsset asset, CancellationToken token)
+    {
+        string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Characters");
+        Directory.CreateDirectory(cache);
+        string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(asset.ArchivePath + "|" + asset.InternalPath + "|" + asset.EntryIndex + "|" + asset.Size)));
+        string resource = Path.Combine(cache, key + ".wft"), geometry = Path.Combine(cache, key + ".geometry.json");
+        if (!File.Exists(resource)) await File.WriteAllBytesAsync(resource, GameLibrary.Extract(asset, archiveNames), token);
+        if (!File.Exists(geometry)) await Python("wft_geometry_inspector.py", [resource, "--output", geometry], token);
+        return geometry;
     }
     private async Task ImportAsync() {
         if (busy) return;
