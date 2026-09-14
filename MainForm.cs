@@ -206,6 +206,21 @@ internal sealed class MainForm : Form
         if (save.ShowDialog(this) != DialogResult.OK) return;
         try
         {
+            // Prefer the bundled Python helper when available: it can expand Zstandard
+            // RSC payloads (including mission resources) before the native fallback.
+            string? python = FindWorkingPython();
+            string semanticScript = Path.Combine(ToolPath, "resource_semantics.py");
+            if (python is not null && File.Exists(semanticScript))
+            {
+                try
+                {
+                    await Execute(python, [semanticScript, open.FileName, "--output", save.FileName], CancellationToken.None, true);
+                    status.Text = "Semantic report written · " + Path.GetFileName(save.FileName);
+                    MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.", "Semantic decode complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                catch { /* Native decoder below still provides a useful report. */ }
+            }
             byte[] bytes = await File.ReadAllBytesAsync(open.FileName);
             string json = ResourceSemantics.DecodeToJson(bytes, Path.GetFullPath(open.FileName));
             await File.WriteAllTextAsync(save.FileName, json + Environment.NewLine);
