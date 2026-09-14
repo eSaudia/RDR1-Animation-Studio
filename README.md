@@ -4,6 +4,35 @@
 
 Created by **eSaudia — Creator & Project Owner**.
 
+RDR1 Animation Studio is a focused Windows workbench for exploring the original
+Red Dead Redemption animation archives and preparing them for Blender. It is a
+research and modding tool: it does not include Rockstar game files and it never
+writes to your RPF archives automatically.
+
+## See it in action
+
+The application indexes real WAS clip records, keeps their source identity, and
+lets you export a single clip, a selection, or an entire animation set.
+
+![Animation Studio library](Assets/RDR1-Animation-Studio-v0.9.0.png)
+
+Exported actions can be opened in Blender on the bundled human skeleton. The
+demo below shows the exported animation workflow and playback timing.
+
+![Animation export demo](Assets/RDR1-Animation-Studio-demo.gif)
+
+![Blender character preview](Assets/RDR1-Animation-Studio-v0.5.0-jack-preview.png)
+
+## What it can do
+
+- Scan a selected RDR1 game directory and discover animation sets across RPF files.
+- Add individual extracted `.was` files for focused inspection.
+- Show internal clip names, frame counts, FPS, source archive, and support status.
+- Detect identical decoded motion without hiding clips merely because their names match.
+- Export selected clips or all clips from a WAS set to Blender-compatible files.
+- Preserve source IDs and validation metadata for experimental Blender round trips.
+- Provide a dark/light theme and a report when a clip layout is unsupported.
+
 ## Library
 
 Choose **Game folder** to collect animation sets from all RPF archives beneath the
