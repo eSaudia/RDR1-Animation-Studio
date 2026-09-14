@@ -34,3 +34,14 @@ def test_vm_requires_script_header_and_decodes_validated_sizes():
     assert report["headers"][0]["valid"] is True
     assert report["functions"][0]["instructions"][0]["name"] == "Function"
     assert report["functions"][0]["instructions"][0]["bytes"] == "2d010002"
+
+
+def test_vm_resolves_native_table_hashes_without_names():
+    header = struct.pack(">11I", 0xA8D74300, 0x5000002C, 0x5000002C, 3, 0, 0, 0, 0x8A019D34, 1, 0x50000034, 0)
+    payload = header + struct.pack(">I", 0x50000030) + bytes([0x2C, 0, 3]) + b"\0" + struct.pack(">I", 0x12345678)
+    report = decode_vm(payload)
+    call = report["functions"][0]["instructions"][0]
+    assert call["name"] == "CallNative"
+    assert call["args"]["nativeHash"] == "0x12345678"
+    assert call["args"]["parameterCount"] == 1
+    assert call["args"]["returnsValue"] is True

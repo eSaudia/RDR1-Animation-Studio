@@ -137,6 +137,9 @@ instruction offset, raw bytes, validated argument width, and control-flow target
 where the format is known. It also records the header signature, code length,
 native/static counts, relative-pointer fields, and code-block starts. The opcode names and size rules are cross-checked
 against the public RDR backend in [RASM](https://github.com/NativeFunction/RASM).
+`CallNative` entries now include the encoded parameter/return bits and the raw
+32-bit native-table hash when the header points to a valid table; names are not
+invented when a matching database is unavailable.
 Generic RSC objects are deliberately not disassembled merely because they contain
 relative pointers; they remain evidence-only until a script header is found. RSC
 wrappers, Zstandard frames, and unknown streams are identified without pretending

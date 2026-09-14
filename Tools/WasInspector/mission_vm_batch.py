@@ -42,6 +42,7 @@ def main() -> int:
                 "expandedFormat": payload.get("format") if isinstance(payload, dict) else None,
                 "headerCandidates": disassembly.get("headerCandidates", []) if isinstance(disassembly, dict) else [],
                 "headers": valid_headers,
+                "nativeTable": disassembly.get("nativeTable", [])[:4096] if isinstance(disassembly, dict) else [],
                 "functionCount": len(functions),
                 "identifiers": [entry.get("value") for entry in payload.get("identifiers", [])[:64]] if isinstance(payload, dict) else [],
                 "unresolved": disassembly.get("unresolved", []) if isinstance(disassembly, dict) else payload.get("unresolved", []) if isinstance(payload, dict) else [],

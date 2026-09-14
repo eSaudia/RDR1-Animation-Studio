@@ -53,7 +53,7 @@ RDR_ONE_BYTE = {
     "pPeekSet", "ToStack", "FromStack", "PushStringNull", "MemCopy", "Catch", "Throw", "pCall"
 }
 
-def _rdr_instruction(data: bytes, offset: int) -> tuple[dict[str, Any], int] | None:
+def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None = None) -> tuple[dict[str, Any], int] | None:
     """Decode one RDR instruction using the validated RASM size rules."""
     if offset >= len(data):
         return None
@@ -76,6 +76,12 @@ def _rdr_instruction(data: bytes, offset: int) -> tuple[dict[str, Any], int] | N
                 args["nativeIndex"] = ((native_data & 0xFF) << 2) & 0x300 | ((native_data >> 8) & 0xFF)
                 args["parameterCount"] = (native_data & 0x3E) >> 1
                 args["returnsValue"] = bool(native_data & 1)
+                if native_values is not None and args["nativeIndex"] < len(native_values):
+                    args["nativeHash"] = f"0x{native_values[args['nativeIndex']]:08X}"
+            elif name == "Call2" or name.startswith("Call2h"):
+                call_type = 0 if name == "Call2" else int(name[-1], 16)
+                args["callType"] = call_type
+                args["callOffset"] = args["value_u16"] | (call_type << 16)
     elif name in {"PushB3", "GetGlobalP3", "GetGlobal3", "SetGlobal3", "PushI24"}:
         size = 4; args["value_u24"] = int.from_bytes(data[offset + 1:offset + 4], "big") if offset + 3 < len(data) else None
     elif name in {"Push", "PushF"}:
@@ -119,6 +125,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
                          if data[i:i + 4] in {b"\x00C\xD7\xA8", b"\xA8\xD7C\x00"}]
     headers: list[dict[str, Any]] = []
     starts_from_headers: list[int] = []
+    native_values: list[int] = []
     for header in header_candidates:
         if header + 44 > len(data):
             continue
@@ -141,6 +148,10 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
                     valid = False
                     break
                 block_starts.append(target)
+            if natives_ptr & 0x0FFFFFFF < len(data):
+                native_start = natives_ptr & 0x0FFFFFFF
+                native_end = min(len(data), native_start + natives_count * 4)
+                native_values = [int.from_bytes(data[pos:pos + 4], "big") for pos in range(native_start, native_end, 4) if pos + 4 <= len(data)]
         record = {"offset": header, "pageBase": f"0x{page_base:08X}", "codeLength": code_length, "parameterCount": parameter_count, "staticsCount": statics_count, "nativesCount": natives_count, "signature": f"0x{signature:08X}", "codeBlocksOffset": code_table, "staticsOffset": statics_ptr & 0x0FFFFFFF, "nativesOffset": natives_ptr & 0x0FFFFFFF, "codeBlockStarts": block_starts, "valid": valid}
         headers.append(record)
         if valid:
@@ -165,7 +176,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
         instructions = []
         pos = start
         for _ in range(256):
-            decoded = _rdr_instruction(data, pos)
+            decoded = _rdr_instruction(data, pos, native_values)
             if decoded is None:
                 break
             ins, size = decoded; instructions.append(ins); pos += size
@@ -174,7 +185,7 @@ def decode_vm(data: bytes, starts: list[int] | None = None) -> dict[str, Any]:
         known = sum(1 for ins in instructions if ins.get("name"))
         if len(instructions) >= 2 and known / len(instructions) >= 0.65:
             functions.append({"start": start, "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3), "instructions": instructions})
-    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; control-flow and native meaning remain partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "functions": functions, "unresolved": ["native hash/name table", "script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]}
+    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native table values are raw hashes; control-flow meaning remains partial", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": [{"index": i, "hash": f"0x{value:08X}"} for i, value in enumerate(native_values[:4096])], "functions": functions, "unresolved": ["native hash/name table", "script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]}
 
 
 def strings(data: bytes) -> list[dict[str, Any]]:
