@@ -312,7 +312,17 @@ internal sealed class MainForm : Form
         using var registration = token.Register(() => { try { p.Kill(true); } catch { } });
         var errors = p.StandardError.ReadToEndAsync(); var output = new System.Text.StringBuilder();
         while (await p.StandardOutput.ReadLineAsync(token) is { } line) { output.AppendLine(line); status.Text = line.Length > 180 ? line[..180] : line; }
-        await p.WaitForExitAsync(token); string error = await errors; if (p.ExitCode != 0) throw new InvalidOperationException(error + "\n" + output);
+        await p.WaitForExitAsync(token); string error = await errors;
+        if (p.ExitCode != 0) throw new InvalidOperationException(SummarizeProcessFailure(error, output.ToString()));
+    }
+    private static string SummarizeProcessFailure(string error, string output)
+    {
+        string combined = (error + "\n" + output).Trim();
+        if (combined.Length == 0) return "The external tool failed without an error message.";
+        string[] lines = combined.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string? detail = lines.LastOrDefault(line => line.Contains("Error:", StringComparison.OrdinalIgnoreCase) || line.Contains("Exception:", StringComparison.OrdinalIgnoreCase));
+        if (detail is not null) return detail;
+        return string.Join(Environment.NewLine, lines.TakeLast(Math.Min(4, lines.Length)));
     }
     internal static string? FindWorkingPython() {
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

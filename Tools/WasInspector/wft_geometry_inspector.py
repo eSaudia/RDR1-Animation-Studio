@@ -10,6 +10,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from rsc_resource_unpack import unpack as unpack_resource
+
 TYPE_SIZES = [2, 4, 6, 8, 4, 8, 12, 16, 4, 4, 4, 0, 0, 0, 4, 8]
 
 
@@ -199,7 +201,12 @@ def main() -> int:
     parser.add_argument("resource", type=Path, help="Decompressed resource data from RpfCli dump-resource.")
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
-    result = inspect(args.resource.read_bytes())
+    raw = args.resource.read_bytes()
+    # WFT files extracted from an RPF are RSC05/RSC85 containers.  The geometry
+    # reader works on the decompressed graphics stream, not the container bytes.
+    if raw[:4] in {b"RSC\x05", b"RSC\x06", b"RSC\x85", b"RSC\x86"}:
+        raw = unpack_resource(raw)
+    result = inspect(raw)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"Decoded {result['geometry_count']} geometries.")
     for geometry in result["geometries"]:
