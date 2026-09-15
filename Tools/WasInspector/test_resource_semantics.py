@@ -1,6 +1,7 @@
 import struct
 
-from resource_semantics import (RDR_OPCODE_NAMES, build_typed_record_candidates,
+from resource_semantics import (RDR_OPCODE_NAMES, build_mission_record_index,
+                                build_typed_record_candidates,
                                 correlate_trace_to_records, decode, decode_vm,
                                 load_native_database, load_native_database_metadata,
                                 rsc85_layout)
@@ -195,6 +196,17 @@ def test_trace_resource_correlation_is_domain_level_only():
     assert correlation["matchedDomains"] == ["camera"]
     assert correlation["domains"]["camera"]["matchedEventCount"] == 1
     assert "runtime branch conditions and loop paths" in correlation["unresolved"]
+
+
+def test_mission_record_index_is_bounded_and_stable():
+    candidates = build_typed_record_candidates([{"offset": 12, "value": "GringoCamera"}, {"offset": 28, "value": "AttachProp"}])
+    index = build_mission_record_index(candidates, {"events": [{"sequence": 4, "domains": ["camera"]}]})
+    assert index["format"] == "RDR mission record index"
+    assert index["recordCount"] == 2
+    assert index["records"][0]["recordId"] == "resourceIdentifier:12"
+    assert index["records"][0]["traceEventSequences"] == [4]
+    assert index["records"][1]["traceEventSequences"] == []
+    assert index["recordsWithTraceReferences"] == 1
 
 
 def test_rdr_opcode_table_covers_post_155_extension():

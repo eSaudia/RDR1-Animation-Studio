@@ -59,15 +59,16 @@ internal static class MissionPackage
         else
             File.WriteAllText(reportPath, ResourceSemantics.DecodeToJson(resource, internalPath) + Environment.NewLine, Encoding.UTF8);
         string? traceFileName = WriteMissionTrace(reportPath, outputDirectory);
+        string? recordIndexFileName = WriteMissionRecordIndex(reportPath, outputDirectory);
         string probePath = Rsc85Probe.Write(outputDirectory, resource);
 
         var manifest = new Dictionary<string, object?>
         {
             ["format"] = "RDR1 Animation Studio single mission package",
-            ["schemaVersion"] = 3,
+            ["schemaVersion"] = 4,
             ["decodeStatus"] = Rsc85Crypto.IsEncryptedResource(resource)
                 ? expandedPayload is { Length: > 0 }
-                    ? "RSC85 v2 AES payload transform, Zstandard expansion, VM header, opcode stream, embedded function boundaries, bounded Call2 graph, source-order mission trace, and typed resource correlation decoded"
+                    ? "RSC85 v2 AES payload transform, Zstandard expansion, VM header, opcode stream, embedded function boundaries, bounded Call2 graph, source-order mission trace, typed resource correlation, and mission record index decoded"
                     : "RSC85 v2 AES payload transform validated; run the bundled Python decoder to expand Zstandard and inspect the VM header"
                 : IsRsc(resource)
                     ? "RSC container validated; payload compression/resource graph remains unresolved"
@@ -99,6 +100,7 @@ internal static class MissionPackage
             },
             ["semanticReport"] = Path.GetFileName(reportPath),
             ["missionTrace"] = traceFileName,
+            ["missionRecordIndex"] = recordIndexFileName,
             ["rscProbe"] = Path.GetFileName(probePath),
             ["unresolved"] = new[]
             {
@@ -106,7 +108,7 @@ internal static class MissionPackage
                 "mission VM event/control-flow semantics beyond the validated bounded instruction stream",
                 "event timing, camera transforms, AI arguments, and audio codec fields"
             },
-            ["nextDecoderStep"] = "Validate typed record candidates against independently decoded event, camera, AI, prop, and audio resource streams; runtime branch conditions remain explicit."
+            ["nextDecoderStep"] = "Validate indexed record candidates against independently decoded event, camera, AI, prop, and audio resource streams; runtime branch conditions remain explicit."
         };
         string manifestPath = Path.Combine(outputDirectory, "mission.manifest.json");
         File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine, Encoding.UTF8);
@@ -134,6 +136,30 @@ internal static class MissionPackage
             // A fallback/native report may not contain a trace, and very large
             // reports should not make package creation fail after the source
             // artifacts have already been preserved.
+            return null;
+        }
+    }
+
+    private static string? WriteMissionRecordIndex(string reportPath, string outputDirectory)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(reportPath, Encoding.UTF8));
+            JsonElement index = default;
+            if (document.RootElement.TryGetProperty("payload", out JsonElement payload) &&
+                payload.TryGetProperty("missionRecordIndex", out JsonElement payloadIndex))
+                index = payloadIndex;
+            else if (document.RootElement.TryGetProperty("missionRecordIndex", out JsonElement rootIndex))
+                index = rootIndex;
+            if (index.ValueKind != JsonValueKind.Object) return null;
+            string indexPath = Path.Combine(outputDirectory, "mission.records.json");
+            File.WriteAllText(indexPath, JsonSerializer.Serialize(index, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine, Encoding.UTF8);
+            return Path.GetFileName(indexPath);
+        }
+        catch (Exception)
+        {
+            // Fallback/native reports may not contain the Python record index;
+            // package creation must still preserve the source and report.
             return null;
         }
     }

@@ -34,6 +34,7 @@ def main() -> int:
     resource_domain_totals = {domain: {"resourceCount": 0, "uniqueIdentifierCount": 0} for domain in MISSION_DOMAINS}
     typed_record_totals = {domain: {"candidateCount": 0, "resourceCount": 0} for domain in MISSION_DOMAINS}
     trace_correlation_totals = {"matchedDomainResourceCount": 0, "resourcesWithTraceDomainEvidence": 0, "resourcesWithCandidates": 0}
+    record_index_totals = {"recordCount": 0, "recordsWithTraceReferences": 0, "resourcesWithRecordIndex": 0}
     for item in records:
         path = Path(item["file"])
         try:
@@ -97,6 +98,11 @@ def main() -> int:
                     trace_correlation_totals["matchedDomainResourceCount"] += 1
                 if trace_correlation.get("status") in {"matched-domain-evidence", "trace-domain-evidence-without-resource-candidate"}:
                     trace_correlation_totals["resourcesWithTraceDomainEvidence"] += 1
+            record_index = payload.get("missionRecordIndex", {}) if isinstance(payload, dict) else {}
+            if isinstance(record_index, dict) and record_index:
+                record_index_totals["resourcesWithRecordIndex"] += 1
+                record_index_totals["recordCount"] += int(record_index.get("recordCount", 0) or 0)
+                record_index_totals["recordsWithTraceReferences"] += int(record_index.get("recordsWithTraceReferences", 0) or 0)
             for entry in usage:
                 if not isinstance(entry, dict) or not entry.get("hash"):
                     continue
@@ -125,6 +131,7 @@ def main() -> int:
                 "typedRecordCandidates": typed_candidates[:4096] if isinstance(typed_candidates, list) else [],
                 "typedRecordCount": payload.get("typedRecordCount", len(typed_candidates)) if isinstance(payload, dict) and isinstance(typed_candidates, list) else 0,
                 "missionTraceCorrelation": trace_correlation,
+                "missionRecordIndex": record_index,
                 "callReferences": call_references[:4096] if isinstance(call_references, list) else [],
                 "callGraph": call_graph[:4096] if isinstance(call_graph, list) else [],
                 "callGraphEdgeCount": disassembly.get("callGraphEdgeCount", len(call_graph)) if isinstance(disassembly, dict) else 0,
@@ -159,6 +166,7 @@ def main() -> int:
         "resourceDomainHints": resource_domain_totals,
         "typedRecordCandidates": typed_record_totals,
         "missionTraceCorrelation": trace_correlation_totals,
+        "missionRecordIndex": record_index_totals,
         "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["hash"])),
         "nativeDomainUsage": sorted(native_domain_totals.values(), key=lambda item: (-item["count"], item["hash"])),
         "nativeDatabase": native_report,

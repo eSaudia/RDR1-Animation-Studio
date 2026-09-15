@@ -294,6 +294,68 @@ def correlate_trace_to_records(trace: dict[str, Any], candidates: list[dict[str,
     }
 
 
+def build_mission_record_index(candidates: list[dict[str, Any]], trace: dict[str, Any]) -> dict[str, Any]:
+    """Create a bounded index that makes candidate/trace relationships queryable.
+
+    A record is only an evidence record until its binary layout is validated.
+    The index nevertheless gives the UI and later tooling stable ids, source
+    offsets, domain counts, and capped trace-event references instead of
+    requiring consumers to scan a large semantic report repeatedly.
+    """
+    trace_events = trace.get("events", []) if isinstance(trace, dict) else []
+    if not isinstance(trace_events, list):
+        trace_events = []
+    events_by_domain: dict[str, list[int]] = {domain: [] for domain in MISSION_DOMAINS}
+    for sequence, event in enumerate(trace_events):
+        if not isinstance(event, dict):
+            continue
+        domains = event.get("domains", [])
+        if not isinstance(domains, list):
+            continue
+        for domain in domains:
+            if domain in events_by_domain and len(events_by_domain[domain]) < 4096:
+                events_by_domain[domain].append(int(event.get("sequence", sequence)))
+    type_counts: dict[str, int] = {}
+    domain_counts = {domain: 0 for domain in MISSION_DOMAINS}
+    records: list[dict[str, Any]] = []
+    referenced_event_count = 0
+    for index, candidate in enumerate(candidates[:4096]):
+        if not isinstance(candidate, dict):
+            continue
+        record_type = candidate.get("recordType") if isinstance(candidate.get("recordType"), str) else "resourceIdentifier"
+        value = candidate.get("value") if isinstance(candidate.get("value"), str) else ""
+        source_offset = candidate.get("sourceOffset")
+        record_id = f"{record_type}:{source_offset}" if isinstance(source_offset, int) else f"{record_type}:{index}"
+        domains = [domain for domain in candidate.get("domains", []) if domain in MISSION_DOMAINS] if isinstance(candidate.get("domains"), list) else []
+        trace_sequences = sorted({sequence for domain in domains for sequence in events_by_domain[domain]})[:32]
+        if trace_sequences:
+            referenced_event_count += 1
+        type_counts[record_type] = type_counts.get(record_type, 0) + 1
+        for domain in domains:
+            domain_counts[domain] += 1
+        records.append({
+            "recordId": record_id,
+            "recordType": record_type,
+            "value": value,
+            "sourceOffset": source_offset,
+            "domains": domains,
+            "traceEventSequences": trace_sequences,
+            "confidence": candidate.get("confidence", "lexical-candidate"),
+            "evidence": candidate.get("evidence", "printable identifier evidence"),
+        })
+    return {
+        "format": "RDR mission record index",
+        "confidence": "bounded candidate index with capped source-order trace references; no runtime object identity or typed payload is claimed",
+        "recordCount": len(records),
+        "typeCounts": dict(sorted(type_counts.items())),
+        "domainCounts": {domain: count for domain, count in domain_counts.items() if count},
+        "traceEventCount": len(trace_events),
+        "recordsWithTraceReferences": referenced_event_count,
+        "records": records,
+        "unresolved": ["runtime branch conditions and loop paths", "event timing and payload semantics", "camera transforms, AI arguments, props, and audio codec fields"],
+    }
+
+
 def build_mission_trace(functions: list[dict[str, Any]]) -> dict[str, Any]:
     """Build a bounded source-order trace of calls, branches, and returns."""
     events: list[dict[str, Any]] = []
@@ -909,6 +971,7 @@ def decode_rbf0(data: bytes) -> dict[str, Any]:
     types = [item["value"] for item in values if item["value"].startswith("rage__cutf")]
     events = [item for item in values if item["value"].startswith("rage__cutfObjectIdEvent9")]
     typed_records = build_typed_record_candidates(values)
+    record_index = build_mission_record_index(typed_records, {})
     return {
         "format": "RBF0",
         "confidence": "verified container and labels; scalar encodings remain raw",
@@ -928,6 +991,7 @@ def decode_rbf0(data: bytes) -> dict[str, Any]:
         "labels": grouped,
         "typedRecordCandidates": typed_records,
         "typedRecordCount": len(typed_records),
+        "missionRecordIndex": record_index,
         "unresolved": [
             "numeric property payloads are preserved as bytes until the RBF value-tag table is validated",
             "event timing and camera transforms require decoding the typed record stream",
@@ -956,6 +1020,7 @@ def decode_xml(data: bytes) -> dict[str, Any]:
     typed_records = build_typed_record_candidates(
         [{"offset": index, "value": element.get("tag")} for index, element in enumerate(elements)]
     )
+    record_index = build_mission_record_index(typed_records, {})
     return {
         "format": "XML",
         "confidence": "verified XML element and attribute values",
@@ -964,6 +1029,7 @@ def decode_xml(data: bytes) -> dict[str, Any]:
         "elements": elements,
         "typedRecordCandidates": typed_records,
         "typedRecordCount": len(typed_records),
+        "missionRecordIndex": record_index,
     }
 
 
@@ -1143,10 +1209,15 @@ def decode(data: bytes, native_names: dict[int, str] | None = None,
     resource_hints = resource_domain_report(identifiers)
     typed_records = build_typed_record_candidates(identifiers)
     trace_correlation = correlate_trace_to_records(vm.get("missionTrace", {}), typed_records)
+    record_index = build_mission_record_index(typed_records, vm.get("missionTrace", {}))
     mission_trace = vm.get("missionTrace", {})
     if isinstance(mission_trace, dict):
         mission_trace = dict(mission_trace)
         mission_trace["resourceCorrelation"] = trace_correlation
+        mission_trace["recordIndexSummary"] = {
+            "recordCount": record_index.get("recordCount", 0),
+            "recordsWithTraceReferences": record_index.get("recordsWithTraceReferences", 0),
+        }
     return {
         "format": "raw",
         "confidence": "validated RDR resource-script header and bounded bytecode stream" if has_valid_script else "verified byte stream and printable identifiers only",
@@ -1157,6 +1228,7 @@ def decode(data: bytes, native_names: dict[int, str] | None = None,
         "missionDomainCorrelation": mission_domain_correlation(resource_hints, vm),
         "typedRecordCandidates": typed_records,
         "typedRecordCount": len(typed_records),
+        "missionRecordIndex": record_index,
         "missionTrace": mission_trace,
         "missionTraceCorrelation": trace_correlation,
         "vmEvidence": {"imageBase": "0x50000000 (candidate)", "headerPointers": pointers, "wordOpcodeHistogram": dict(sorted(histogram.items(), key=lambda pair: (-pair[1], pair[0]))[:64]), "disassembly": vm},
@@ -1207,6 +1279,7 @@ def main() -> int:
     parser.add_argument("-o", "--output", type=Path)
     parser.add_argument("--expanded-output", type=Path, help="Write the expanded RSC85 virtual payload when the AES/Zstandard path succeeds")
     parser.add_argument("--trace-output", type=Path, help="Write the bounded source-order mission trace as a separate JSON file")
+    parser.add_argument("--records-output", type=Path, help="Write the bounded mission record index as a separate JSON file")
     parser.add_argument("--native-db", type=Path, help="Optional RDR1 native hash database JSON")
     args = parser.parse_args()
     native_metadata, native_path = load_native_database_metadata(args.native_db)
@@ -1246,6 +1319,16 @@ def main() -> int:
             report["missionTraceExport"] = {"status": "written", "file": str(args.trace_output), "eventCount": trace.get("eventCount", 0)}
         else:
             report["missionTraceExport"] = {"status": "not-available", "reason": "no validated VM trace was produced"}
+    if args.records_output:
+        record_index = report.get("missionRecordIndex")
+        if not isinstance(record_index, dict) and isinstance(report.get("payload"), dict):
+            record_index = report["payload"].get("missionRecordIndex")
+        if isinstance(record_index, dict) and record_index.get("format") == "RDR mission record index":
+            args.records_output.parent.mkdir(parents=True, exist_ok=True)
+            args.records_output.write_text(json.dumps(record_index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            report["missionRecordExport"] = {"status": "written", "file": str(args.records_output), "recordCount": record_index.get("recordCount", 0)}
+        else:
+            report["missionRecordExport"] = {"status": "not-available", "reason": "no bounded mission record index was produced"}
     encoded = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

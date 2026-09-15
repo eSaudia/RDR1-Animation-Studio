@@ -203,7 +203,7 @@ internal sealed class MainForm : Form
         title.Text = page == "Library" ? "Animation library" : page;
         libraryPage.Visible = page == "Library"; scenePage.Visible = page == "Scenes"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !scenePage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
-        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.12 · Mission Trace & Resource Correlation\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nMission reports now include bounded VM traces and conservative typed-resource candidates; unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
+        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.13 · Mission Record Index\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nMission reports now include bounded VM traces, candidate resource records, and a stable record index; unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") {
             string inventory = gameLibrary is null ? "No game folder scanned yet." :
                 $"Mission resource inventory (identified, not decoded):\n" +

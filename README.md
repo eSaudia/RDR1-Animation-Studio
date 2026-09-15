@@ -1,6 +1,6 @@
 ![RDR1 Animation Studio](Assets/release-banner.png)
 
-# RDR1 Animation Studio 0.12 · Mission Trace & Resource Correlation
+# RDR1 Animation Studio 0.13 · Mission Record Index
 
 Created by **eSaudia — Creator & Project Owner**.
 
@@ -236,6 +236,13 @@ database is over the safe read limit, the trace reports resource candidates but
 does not invent native-name matches; the result is intentionally marked
 `resource-candidate-without-trace-domain-evidence` until a validated native
 table and typed event stream are available.
+
+Focused mission packages also emit `mission.records.json`. This is a compact,
+stable index of those candidates: each entry has a generated record id, source
+offset, candidate type, domains, and up to 32 source-order trace event
+references. It is designed for filtering and later schema validation, so it is
+not a list of confirmed runtime objects. The same index can be requested from
+the headless decoder with `--records-output <path>`.
 
 The following correlation layer is now included in each VM report. When a
 native database supplies a resolved name, calls receive conservative domain
