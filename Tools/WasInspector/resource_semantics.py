@@ -9,6 +9,7 @@ fully documented; unknown values are therefore never guessed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -17,6 +18,8 @@ import struct
 import zlib
 from pathlib import Path
 from typing import Any
+
+from rsc85_crypto import decrypt_payload
 
 try:
     import zstandard  # optional, needed for camera.rpf entries
@@ -44,15 +47,347 @@ RDR_OPCODE_NAMES = [
     "ReturnP0R2", "ReturnP0R3", "ReturnP1R0", "ReturnP1R1", "ReturnP1R2", "ReturnP1R3", "ReturnP2R0", "ReturnP2R1", "ReturnP2R2",
     "ReturnP2R3", "ReturnP3R0", "ReturnP3R1", "ReturnP3R2", "ReturnP3R3", "Push_Neg1", "Push_0", "Push_1", "Push_2", "Push_3",
     "Push_4", "Push_5", "Push_6", "Push_7", "PushF_Neg1", "PushF_0", "PushF_1", "PushF_2", "PushF_3", "PushF_4", "PushF_5",
-    "PushF_6", "PushF_7"
+    "PushF_6", "PushF_7", "PatchRet", "PatchTrap0", "PatchTrap1", "PatchTrap2", "PatchTrap3", "PatchTrap4", "PatchTrap5",
+    "PatchTrap6", "PatchTrap7", "PatchTrap8", "PatchTrap9", "PatchTrapA", "PatchTrapB", "PatchTrapC", "PatchTrapD", "PatchTrapE",
+    "PatchTrapF", "CallPatch", "CallOutOfPatch", "LoadRef", "StoreRef", "StoreVector", "MakeVector"
 ]
 
 RDR_ONE_BYTE = {
     "Nop", "Add", "Sub", "Mult", "Div", "Mod", "Not", "Neg", "CmpEq", "CmpNe", "CmpGt", "CmpGe", "CmpLt", "CmpLe",
     "fAdd", "fSub", "fMult", "fDiv", "fMod", "fNeg", "fCmpEq", "fCmpNe", "fCmpGt", "fCmpGe", "fCmpLt", "fCmpLe",
     "vAdd", "vSub", "vMult", "vDiv", "vNeg", "And", "Or", "Xor", "ItoF", "FtoI", "FtoV", "Dup", "Drop", "pGet", "pSet",
-    "pPeekSet", "ToStack", "FromStack", "PushStringNull", "MemCopy", "Catch", "Throw", "pCall"
+    "pPeekSet", "ToStack", "FromStack", "PushStringNull", "MemCopy", "Catch", "Throw", "pCall",
+    # RASM's post-155 extension opcodes are compact, operand-free instructions.
+    # Keep them explicit so a decoded report can distinguish these known VM
+    # operations from an unknown byte and continue scanning the bounded stream.
+    "PatchRet", "PatchTrap0", "PatchTrap1", "PatchTrap2", "PatchTrap3", "PatchTrap4", "PatchTrap5", "PatchTrap6",
+    "PatchTrap7", "PatchTrap8", "PatchTrap9", "PatchTrapA", "PatchTrapB", "PatchTrapC", "PatchTrapD", "PatchTrapE",
+    "PatchTrapF", "CallPatch", "CallOutOfPatch", "LoadRef", "StoreRef", "StoreVector", "MakeVector"
 }
+
+MISSION_DOMAINS = ("camera", "actor", "ai", "prop", "audio", "animation", "timing")
+
+# These are deliberately conservative lexical hints, not a replacement for a
+# native signature table or a decoded mission record schema.  A domain is only
+# emitted when the source supplies a resolved name/identifier; raw hashes and
+# arbitrary bytes remain unresolved.
+NATIVE_DOMAIN_TOKENS = {
+    "camera": ("camera", "cam_", "cutscene", "cinematic", "shot"),
+    "actor": ("actor", "ped", "player", "character", "npc", "animal"),
+    "ai": ("task_", "brain", "behavior", "behaviour", "react", "attack", "patrol", "cover", "target", "capability"),
+    "prop": ("prop", "object", "weapon", "vehicle", "model", "attach", "locator"),
+    "audio": ("audio", "sound", "voice", "speech", "shout", "music", "subtitle"),
+    "animation": ("anim", "motion", "posture", "gesture", "walk", "run", "idle", "clip"),
+    "timing": ("time", "delay", "duration", "timer", "timeout", "phase", "sequence", "event"),
+}
+
+RESOURCE_DOMAIN_TOKENS = {
+    **NATIVE_DOMAIN_TOKENS,
+    "camera": ("camera", "cam", "cutscene", "cinematic", "shot", "gringo_camera"),
+    "actor": ("actor", "ped", "player", "character", "npc", "animal", "john", "jack"),
+    "ai": ("ai", "brain", "behavior", "behaviour", "react", "attack", "patrol", "cover", "target", "capability", "allowtalking"),
+    "prop": ("prop", "object", "weapon", "vehicle", "model", "attach", "locator", "bone"),
+    "audio": ("audio", "sound", "voice", "speech", "shout", "music", "subtitle"),
+    "animation": ("anim", "motion", "posture", "gesture", "walk", "run", "idle", "clip"),
+    "timing": ("time", "delay", "duration", "timer", "timeout", "phase", "sequence", "event", "min_", "max_"),
+}
+
+
+def classify_domain_hints(value: str, tokens: dict[str, tuple[str, ...]]) -> list[str]:
+    """Return stable domain candidates for a validated name/identifier."""
+    lower = value.lower()
+    return [domain for domain in MISSION_DOMAINS
+            if any(token in lower for token in tokens.get(domain, ()))]
+
+
+def native_domain_report(native_usage: dict[tuple[int, str | None], dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
+    """Summarize resolved native calls with explicitly heuristic domain hints."""
+    counts = {domain: {"callCount": 0, "nativeCount": 0} for domain in MISSION_DOMAINS}
+    entries: list[dict[str, Any]] = []
+    for usage in sorted(native_usage.values(), key=lambda item: (-item["count"], item["nativeIndex"])):
+        name = usage.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        domains = classify_domain_hints(name, NATIVE_DOMAIN_TOKENS)
+        if not domains:
+            continue
+        entry = dict(usage)
+        entry["domains"] = domains
+        entry["evidence"] = "resolved native name lexical hint; verify against native signature and mission records"
+        entries.append(entry)
+        for domain in domains:
+            counts[domain]["callCount"] += int(usage.get("count", 0) or 0)
+            counts[domain]["nativeCount"] += 1
+    return entries, counts
+
+
+def resource_domain_report(identifiers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Group printable resource identifiers into reviewable domain hints."""
+    values: dict[str, set[str]] = {domain: set() for domain in MISSION_DOMAINS}
+    for item in identifiers:
+        value = item.get("value") if isinstance(item, dict) else None
+        if not isinstance(value, str):
+            continue
+        for domain in classify_domain_hints(value, RESOURCE_DOMAIN_TOKENS):
+            values[domain].add(value)
+    return {domain: {"uniqueIdentifierCount": len(names), "identifiers": sorted(names)[:128],
+                     "evidence": "printable resource identifier lexical hint; payload fields remain unresolved"}
+            for domain, names in values.items() if names}
+
+
+def function_domain_report(functions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach resolved-native domain hints to their containing VM functions."""
+    result: list[dict[str, Any]] = []
+    for function in functions:
+        domain_calls: dict[str, int] = {}
+        domain_native_indexes: dict[str, set[int]] = {}
+        native_calls = function.get("nativeCalls", [])
+        if not isinstance(native_calls, list):
+            native_calls = []
+        for call in native_calls:
+            if not isinstance(call, dict) or not isinstance(call.get("nativeName"), str):
+                continue
+            domains = classify_domain_hints(call["nativeName"], NATIVE_DOMAIN_TOKENS)
+            if not domains:
+                continue
+            call["domains"] = domains
+            call["domainEvidence"] = "resolved native name lexical hint; verify against native signature and mission records"
+            native_index = call.get("nativeIndex")
+            for domain in domains:
+                domain_calls[domain] = domain_calls.get(domain, 0) + 1
+                if isinstance(native_index, int):
+                    domain_native_indexes.setdefault(domain, set()).add(native_index)
+        function["domainUsage"] = {
+            domain: {"nativeCallCount": count, "nativeIndexes": sorted(domain_native_indexes.get(domain, set()))}
+            for domain, count in sorted(domain_calls.items())
+        }
+        if domain_calls:
+            result.append({"functionIndex": function.get("index"), "label": function.get("label"),
+                           "start": function.get("start"), "domains": function["domainUsage"],
+                           "evidence": "resolved native names grouped within a validated function boundary"})
+    return result
+
+
+def mission_domain_correlation(resource_hints: dict[str, dict[str, Any]], vm_report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Join resource-identifier hints with function-scoped native evidence."""
+    function_entries = vm_report.get("functionDomainUsage", [])
+    aggregate = vm_report.get("domainUsage", {})
+    result: dict[str, dict[str, Any]] = {}
+    for domain in MISSION_DOMAINS:
+        resource = resource_hints.get(domain, {}) if isinstance(resource_hints, dict) else {}
+        native = aggregate.get(domain, {}) if isinstance(aggregate, dict) else {}
+        functions = [entry for entry in function_entries if isinstance(entry, dict) and domain in entry.get("domains", {})] if isinstance(function_entries, list) else []
+        if not resource and not native.get("callCount") and not functions:
+            continue
+        result[domain] = {
+            "resourceIdentifierCount": resource.get("uniqueIdentifierCount", 0),
+            "resourceIdentifiers": resource.get("identifiers", []),
+            "nativeCallCount": native.get("callCount", 0),
+            "nativeCount": native.get("nativeCount", 0),
+            "functions": functions,
+            "confidence": "resolved-native and/or printable-identifier evidence; typed mission record correlation remains unresolved",
+        }
+    return result
+
+
+def build_typed_record_candidates(identifiers: list[dict[str, Any]], limit: int = 4096) -> list[dict[str, Any]]:
+    """Build bounded, reviewable record candidates from validated labels.
+
+    These are *candidates*, not decoded game objects.  A printable identifier
+    can tell us that a resource likely participates in a camera/actor/etc.
+    domain, but it cannot prove the binary field layout or runtime meaning.
+    Keeping the source offset and evidence text makes the next reverse-
+    engineering pass reproducible without silently promoting a name to a
+    semantic fact.
+    """
+    candidates: list[dict[str, Any]] = []
+    for item in identifiers[:limit]:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        if not isinstance(value, str) or not value:
+            continue
+        domains = classify_domain_hints(value, RESOURCE_DOMAIN_TOKENS)
+        if not domains:
+            continue
+        lower = value.lower()
+        if value.startswith("rage__cutfObjectIdEvent9"):
+            record_type = "cutsceneEvent"
+        elif value.startswith("rage__cutf"):
+            record_type = "cutsceneType"
+        elif any(token in lower for token in ("time", "delay", "duration", "timeout", "phase")):
+            record_type = "timingField"
+        else:
+            record_type = "resourceIdentifier"
+        candidates.append({
+            "recordType": record_type,
+            "value": value,
+            "sourceOffset": item.get("offset"),
+            "domains": domains,
+            "confidence": "lexical-candidate",
+            "evidence": "printable identifier matched conservative domain tokens; binary record fields remain unresolved",
+        })
+    return candidates
+
+
+def correlate_trace_to_records(trace: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Cross-reference trace domain evidence with candidate resource records."""
+    trace_events = trace.get("events", []) if isinstance(trace, dict) else []
+    if not isinstance(trace_events, list):
+        trace_events = []
+    event_counts = {domain: 0 for domain in MISSION_DOMAINS}
+    candidate_counts = {domain: 0 for domain in MISSION_DOMAINS}
+    matched_events = {domain: 0 for domain in MISSION_DOMAINS}
+    candidate_values: dict[str, list[str]] = {domain: [] for domain in MISSION_DOMAINS}
+    for event in trace_events:
+        if not isinstance(event, dict):
+            continue
+        domains = event.get("domains", [])
+        if not isinstance(domains, list):
+            continue
+        for domain in domains:
+            if domain in event_counts:
+                event_counts[domain] += 1
+    for candidate in candidates[:4096]:
+        if not isinstance(candidate, dict):
+            continue
+        domains = candidate.get("domains", [])
+        if not isinstance(domains, list):
+            continue
+        value = candidate.get("value")
+        for domain in domains:
+            if domain not in candidate_counts:
+                continue
+            candidate_counts[domain] += 1
+            if isinstance(value, str) and len(candidate_values[domain]) < 32 and value not in candidate_values[domain]:
+                candidate_values[domain].append(value)
+    for domain in MISSION_DOMAINS:
+        if event_counts[domain] and candidate_counts[domain]:
+            matched_events[domain] = event_counts[domain]
+    matched_domains = [domain for domain in MISSION_DOMAINS if matched_events[domain]]
+    if matched_domains:
+        status = "matched-domain-evidence"
+    elif any(event_counts.values()):
+        status = "trace-domain-evidence-without-resource-candidate"
+    elif any(candidate_counts.values()):
+        status = "resource-candidate-without-trace-domain-evidence"
+    else:
+        status = "no-domain-evidence"
+    return {
+        "format": "RDR mission trace/resource correlation",
+        "status": status,
+        "confidence": "domain-level lexical cross-reference only; event timing, payload offsets, and runtime identity remain unresolved",
+        "traceEventCount": len(trace_events),
+        "candidateCount": len(candidates),
+        "matchedDomains": matched_domains,
+        "domains": {
+            domain: {
+                "traceEventCount": event_counts[domain],
+                "candidateCount": candidate_counts[domain],
+                "matchedEventCount": matched_events[domain],
+                "candidateValues": candidate_values[domain],
+            }
+            for domain in MISSION_DOMAINS
+            if event_counts[domain] or candidate_counts[domain]
+        },
+        "unresolved": ["runtime branch conditions and loop paths", "event timing and payload semantics", "camera transforms, AI arguments, props, and audio codec fields"],
+    }
+
+
+def build_mission_trace(functions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a bounded source-order trace of calls, branches, and returns."""
+    events: list[dict[str, Any]] = []
+    opcode_counts: dict[str, int] = {}
+    native_call_count = 0
+    resolved_native_call_count = 0
+    unresolved_native_call_count = 0
+    call2_count = 0
+    branch_count = 0
+    return_count = 0
+    event_limit = 16384
+    events_truncated = False
+    branch_names = {"Jump", "JumpFalse", "JumpNe", "JumpEq", "JumpLe", "JumpLt", "JumpGe", "JumpGt"}
+    for function in functions:
+        function_index = function.get("index")
+        label = function.get("label")
+        instructions = function.get("instructions", [])
+        if not isinstance(instructions, list):
+            continue
+        for instruction in instructions:
+            if not isinstance(instruction, dict):
+                continue
+            name = instruction.get("name")
+            if not isinstance(name, str):
+                continue
+            opcode_counts[name] = opcode_counts.get(name, 0) + 1
+            args = instruction.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+            event: dict[str, Any] | None = None
+            if name == "CallNative":
+                native_call_count += 1
+                if isinstance(args.get("nativeHash"), str):
+                    resolved_native_call_count += 1
+                else:
+                    unresolved_native_call_count += 1
+                event = {"kind": "nativeCall", "functionIndex": function_index, "functionLabel": label,
+                         "offset": instruction.get("offset"), "nativeIndex": args.get("nativeIndex"),
+                         "nativeHash": args.get("nativeHash"), "parameterCount": args.get("parameterCount"),
+                         "returnsValue": args.get("returnsValue"), "nativeResolved": isinstance(args.get("nativeHash"), str)}
+                if "nativeName" in args:
+                    event["nativeName"] = args["nativeName"]
+                if "domains" in instruction:
+                    event["domains"] = instruction["domains"]
+                elif isinstance(args.get("nativeName"), str):
+                    domains = classify_domain_hints(args["nativeName"], NATIVE_DOMAIN_TOKENS)
+                    if domains:
+                        event["domains"] = domains
+            elif name == "Call2" or name.startswith("Call2h"):
+                call2_count += 1
+                event = {"kind": "call2", "functionIndex": function_index, "functionLabel": label,
+                         "offset": instruction.get("offset"), "callType": args.get("callType", 0),
+                         "targetOffset": args.get("callOffset"), "targetFunctionIndex": args.get("targetFunctionIndex"),
+                         "targetResolved": isinstance(args.get("targetFunctionIndex"), int)}
+            elif name in branch_names:
+                branch_count += 1
+                event = {"kind": "branch", "functionIndex": function_index, "functionLabel": label,
+                         "offset": instruction.get("offset"), "opcode": name,
+                         "targetOffset": args.get("target")}
+            elif name.startswith("Return"):
+                return_count += 1
+                event = {"kind": "return", "functionIndex": function_index, "functionLabel": label,
+                         "offset": instruction.get("offset"), "opcode": name}
+            if event is not None:
+                event["sequence"] = len(events)
+                events.append(event)
+                if len(events) >= event_limit:
+                    events_truncated = True
+                    break
+        if len(events) >= event_limit:
+            break
+    function_summary = [{key: function.get(key) for key in (
+        "index", "label", "start", "end", "parameterCount", "variableCount",
+        "instructionCount", "nativeCallCount", "outgoingCallCount", "outgoingFunctions",
+        "incomingCallCount", "incomingFunctions", "domainUsage")}
+        for function in functions]
+    return {
+        "format": "RDR mission trace",
+        "confidence": "bounded source-order trace of validated VM instructions; this is not runtime execution or a fully decoded mission timeline",
+        "ordering": "function index, then instruction offset",
+        "eventLimit": event_limit,
+        "eventsTruncated": events_truncated,
+        "eventCount": len(events),
+        "nativeCallCount": native_call_count,
+        "resolvedNativeCallCount": resolved_native_call_count,
+        "unresolvedNativeCallCount": unresolved_native_call_count,
+        "call2Count": call2_count,
+        "branchCount": branch_count,
+        "returnCount": return_count,
+        "opcodeCounts": dict(sorted(opcode_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "functions": function_summary,
+        "events": events,
+        "unresolved": ["runtime branch conditions and loop paths", "event timing and payload semantics", "camera transforms, AI arguments, props, and audio codec fields"],
+    }
 
 def _normalize_native_hash(value: Any) -> int | None:
     """Normalize native ids from common database JSON representations."""
@@ -87,6 +422,16 @@ def load_native_database_metadata(path: str | Path | None = None) -> tuple[dict[
     selected = next((candidate for candidate in candidates if candidate.is_file()), None)
     if selected is None:
         return {}, None
+    # A malformed or accidentally exported database can be enormous (the
+    # user's current natives.json is over a gigabyte).  Loading it with
+    # json.loads would allocate several copies and take down the viewer before
+    # a mission can be decoded.  Keep the selected path visible in the report,
+    # but retain hashes when the database is too large for a bounded read.
+    try:
+        if selected.stat().st_size > 128 * 1024 * 1024:
+            return {}, str(selected)
+    except OSError:
+        return {}, str(selected)
     try:
         raw = json.loads(selected.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -220,7 +565,8 @@ def _rdr_instruction(data: bytes, offset: int, native_values: list[int] | None =
 
 def decode_vm(data: bytes, starts: list[int] | None = None,
               native_names: dict[int, str] | None = None,
-              native_metadata: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
+              native_metadata: dict[int, dict[str, Any]] | None = None,
+              object_start: int | None = None) -> dict[str, Any]:
     pointers = []
     for offset in range(0, min(len(data), 0x2000) - 3, 4):
         value = int.from_bytes(data[offset:offset + 4], "little")
@@ -233,10 +579,92 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
     # never label those bytes as VM instructions without the marker.
     header_candidates = [i for i in range(0, min(len(data), 0x4000) - 3, 4)
                          if data[i:i + 4] in {b"\x00C\xD7\xA8", b"\xA8\xD7C\x00"}]
+    legacy_header_candidates = list(header_candidates)
     headers: list[dict[str, Any]] = []
     starts_from_headers: list[int] = []
     native_values: list[int] = []
-    for header in header_candidates:
+    # The compact script header gives the code length, while function markers
+    # are embedded in that code stream. Keep a separate scan bound so static
+    # storage and trailing padding cannot be mistaken for bytecode.
+    code_scan_end: int | None = None
+
+    # RSC85 mission resources use the compact resource-script header that
+    # Magic-RDR reads at FlagInfo.RSC85_ObjectStart.  The PC/Switch payload is
+    # little-endian even though the bytecode itself keeps the established RDR
+    # instruction encodings.  Validate all pointer/count fields before using
+    # the object as a code source; this prevents arbitrary expanded resources
+    # from being labelled as scripts.
+    if object_start is not None and 0 <= object_start <= len(data) - 40:
+        words = struct.unpack_from("<10I", data, object_start)
+        script_magic, sub_header, code_pointer, code_length, parameter_count, static_count, static_pointer, global_version, native_count, native_pointer = words
+        to_offset = lambda value: value & 0x0FFFFFFF if (value >> 28) == 5 else value
+        sub_offset = to_offset(sub_header)
+        code_offset = to_offset(code_pointer)
+        static_offset = to_offset(static_pointer)
+        native_offset = to_offset(native_pointer)
+        page_count = (code_length + 0x3FFF) >> 14 if code_length else 0
+        block_starts: list[int] = []
+        valid = (
+            script_magic in {0x00ACE444, 0x00ACE445}
+            and code_length > 0
+            and code_length <= len(data)
+            and 0 <= code_offset <= len(data) - page_count * 4
+            and parameter_count <= 0x100
+            and static_count <= 0x100000
+            and 0 <= static_offset <= len(data) - static_count * 4
+            and native_count <= 0x10000
+            and 0 <= native_offset <= len(data) - native_count * 4
+        )
+        if valid:
+            for index in range(page_count):
+                target = to_offset(struct.unpack_from("<I", data, code_offset + index * 4)[0])
+                if target >= len(data):
+                    valid = False
+                    break
+                block_starts.append(target)
+        if valid:
+            native_values = [struct.unpack_from("<I", data, native_offset + index * 4)[0]
+                             for index in range(native_count)]
+            code_scan_end = min(len(data), code_length)
+        static_values: list[int] = []
+        static_nonzero_count = 0
+        static_sha256: str | None = None
+        if valid:
+            static_bytes = data[static_offset:static_offset + static_count * 4]
+            static_sha256 = hashlib.sha256(static_bytes).hexdigest().upper()
+            # Keep the report bounded even for scripts with very large static
+            # tables; the full bytes remain available in payload.expanded.bin.
+            static_values = [struct.unpack_from("<I", static_bytes, index * 4)[0]
+                             for index in range(min(static_count, 4096))]
+            static_nonzero_count = sum(1 for index in range(static_count)
+                                       if struct.unpack_from("<I", static_bytes, index * 4)[0] != 0)
+        header_candidates.append(object_start)
+        headers.append({
+            "offset": object_start,
+            "format": "RDR resource script",
+            "endian": "little",
+            "magic": f"0x{script_magic:08X}",
+            "subHeaderOffset": sub_offset,
+            "codePointerOffset": code_offset,
+            "codeLength": code_length,
+            "parameterCount": parameter_count,
+            "staticsCount": static_count,
+            "staticsOffset": static_offset,
+            "staticInitialValues": static_values,
+            "staticValuesTruncated": static_count > len(static_values),
+            "staticNonZeroCount": static_nonzero_count,
+            "staticTableSha256": static_sha256,
+            "globalVersion": f"0x{global_version:08X}",
+            "nativesCount": native_count,
+            "nativesOffset": native_offset,
+            "pageCount": page_count,
+            "codeBlockStarts": block_starts,
+            "valid": valid,
+            "validation": "resource object-start header, page table, and native table fit expanded RSC85 payload" if valid else "resource-script fields failed bounds or magic validation",
+        })
+        if valid:
+            starts_from_headers.extend(block_starts)
+    for header in legacy_header_candidates:
         if header + 44 > len(data):
             continue
         read = lambda pos: int.from_bytes(data[header + pos:header + pos + 4], "big")
@@ -277,26 +705,65 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
             "headers": headers,
             "functions": [],
             "nativeUsage": [],
+            "nativeDomainUsage": [],
+            "domainUsage": {domain: {"callCount": 0, "nativeCount": 0} for domain in MISSION_DOMAINS},
+            "functionDomainUsage": [],
+            "missionTrace": {"format": "RDR mission trace", "confidence": "no validated VM functions", "eventCount": 0, "events": [], "functions": []},
+            "callGraph": [],
+            "callGraphEdgeCount": 0,
+            "callGraphResolvedCallCount": 0,
+            "callGraphUnresolvedCallCount": 0,
             "callReferences": [],
             "unresolved": ["resource is not a validated XSC/CSC payload (or the script header is nested/obfuscated)", "native hash/name table", "mission-specific event semantics"]
         }
-    candidates = sorted(set(starts or starts_from_headers))
+    # RDR's code table identifies page entry points, while each page contains
+    # a sequence of `Function` markers. Discover those markers with the same
+    # validated instruction-size decoder before disassembling each function.
+    # This remains evidence-only: a marker is a boundary, not a decompiled
+    # function name or mission event semantic.
+    discovered_function_starts: list[int] = []
+    if code_scan_end is not None and starts_from_headers:
+        scan_pos = max(0, min(starts_from_headers))
+        while scan_pos < code_scan_end:
+            decoded = _rdr_instruction(data, scan_pos, native_values, native_names, native_metadata)
+            if decoded is None:
+                break
+            instruction, size = decoded
+            if instruction.get("name") == "Function":
+                discovered_function_starts.append(scan_pos)
+            scan_pos += max(1, size)
+    candidates = sorted(set(starts if starts else starts_from_headers))
+    if discovered_function_starts:
+        candidates = sorted(set(candidates).union(discovered_function_starts))
+    function_end = code_scan_end if code_scan_end is not None else len(data)
+    function_index_by_start = {start: index for index, start in enumerate(candidates[:4096])}
     functions = []
     native_usage: dict[tuple[int, str | None], dict[str, Any]] = {}
     call_references: list[dict[str, Any]] = []
     signature_mismatches = 0
-    for start in candidates[:256]:
+    for function_index, start in enumerate(candidates[:4096]):
         if start >= len(data):
             continue
+        next_starts = [candidate for candidate in candidates if candidate > start]
+        boundary = min(next_starts[0] if next_starts else function_end, function_end)
         instructions = []
         pos = start
-        for _ in range(256):
+        terminated_by = "boundary"
+        for _ in range(8192):
+            if pos >= boundary:
+                break
             decoded = _rdr_instruction(data, pos, native_values, native_names, native_metadata)
             if decoded is None:
                 break
             ins, size = decoded; instructions.append(ins); pos += size
-            if ins.get("name") is None or ins.get("name", "").startswith("Return") or pos - start >= 0x800:
+            if ins.get("name") is None:
+                terminated_by = "unknown-opcode"
                 break
+            if ins.get("name", "").startswith("Return"):
+                terminated_by = "return"
+                break
+        else:
+            terminated_by = "instruction-limit"
         known = sum(1 for ins in instructions if ins.get("name"))
         if len(instructions) >= 2 and known / len(instructions) >= 0.65:
             native_calls: list[dict[str, Any]] = []
@@ -320,9 +787,72 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
                     call_references.append({"function": start, **edge})
                 elif ins_name == "Call2" or (isinstance(ins_name, str) and ins_name.startswith("Call2h")):
                     if isinstance(args.get("callOffset"), int):
+                        target_function = function_index_by_start.get(args["callOffset"])
+                        if target_function is not None:
+                            args["targetFunctionIndex"] = target_function
+                            args["targetFunctionStart"] = args["callOffset"]
                         reference = {"function": start, "from": ins.get("offset"), "to": args["callOffset"], "kind": "call2", "callType": args.get("callType", 0)}
+                        if target_function is not None:
+                            reference["targetFunctionIndex"] = target_function
                         call_references.append(reference)
-            functions.append({"start": start, "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3), "nativeCallCount": len(native_calls), "nativeCalls": native_calls, "controlFlowEdges": control_flow, "instructions": instructions})
+            function_header = next((item for item in instructions if item.get("name") == "Function"), None)
+            function_args = function_header.get("args", {}) if function_header else {}
+            functions.append({"index": function_index, "label": "main" if start == 0 else f"Function_{function_index}",
+                              "start": start, "end": pos,
+                              "parameterCount": function_args.get("parameterCount"),
+                              "variableCount": function_args.get("variableCount"),
+                              "instructionCount": len(instructions), "knownRatio": round(known / len(instructions), 3),
+                              "nativeCallCount": len(native_calls), "nativeCalls": native_calls,
+                              "controlFlowEdges": control_flow, "outgoingCallCount": 0, "outgoingFunctions": [],
+                              "incomingCallCount": 0, "incomingFunctions": [], "terminatedBy": terminated_by,
+                              "instructions": instructions})
+
+    # Resolve the bounded Call2 references into an aggregate function graph.
+    # Function markers provide stable structural identities; the generated
+    # labels are intentionally not treated as mission-semantic names.
+    function_index_by_actual_start = {item["start"]: item["index"] for item in functions}
+    graph_counts: dict[tuple[int, int, int], int] = {}
+    unresolved_call_count = 0
+    for reference in call_references:
+        if reference.get("kind") != "call2":
+            continue
+        caller_index = function_index_by_actual_start.get(reference.get("function"))
+        callee_index = reference.get("targetFunctionIndex")
+        if caller_index is None or callee_index not in function_index_by_actual_start.values():
+            unresolved_call_count += 1
+            continue
+        call_type = int(reference.get("callType", 0))
+        key = (caller_index, int(callee_index), call_type)
+        graph_counts[key] = graph_counts.get(key, 0) + 1
+    function_records_by_index = {item["index"]: item for item in functions}
+    call_graph: list[dict[str, Any]] = []
+    for (caller_index, callee_index, call_type), count in sorted(graph_counts.items()):
+        caller = function_records_by_index[caller_index]
+        callee = function_records_by_index[callee_index]
+        call_graph.append({"callerFunctionIndex": caller_index, "callerLabel": caller["label"],
+                           "callerStart": caller["start"], "calleeFunctionIndex": callee_index,
+                           "calleeLabel": callee["label"], "calleeStart": callee["start"],
+                           "callType": call_type, "count": count})
+    outgoing: dict[int, dict[int, int]] = {}
+    incoming: dict[int, dict[int, int]] = {}
+    for edge in call_graph:
+        caller_index = edge["callerFunctionIndex"]
+        callee_index = edge["calleeFunctionIndex"]
+        caller_outgoing = outgoing.setdefault(caller_index, {})
+        caller_outgoing[callee_index] = caller_outgoing.get(callee_index, 0) + edge["count"]
+        callee_incoming = incoming.setdefault(callee_index, {})
+        callee_incoming[caller_index] = callee_incoming.get(caller_index, 0) + edge["count"]
+    for function in functions:
+        function_index = function["index"]
+        outgoing_map = outgoing.get(function_index, {})
+        incoming_map = incoming.get(function_index, {})
+        function["outgoingCallCount"] = sum(outgoing_map.values())
+        function["outgoingFunctions"] = sorted(outgoing_map)
+        function["incomingCallCount"] = sum(incoming_map.values())
+        function["incomingFunctions"] = sorted(incoming_map)
+    native_domain_usage, domain_usage = native_domain_report(native_usage)
+    function_domain_usage = function_domain_report(functions)
+    mission_trace = build_mission_trace(functions)
     native_table = []
     for i, value in enumerate(native_values[:4096]):
         entry: dict[str, Any] = {"index": i, "hash": f"0x{value:08X}"}
@@ -335,10 +865,12 @@ def decode_vm(data: bytes, starts: list[int] | None = None,
             if metadata.get("returnType"):
                 entry["returnType"] = metadata["returnType"]
         native_table.append(entry)
-    unresolved = ["script header/code-block boundaries", "encrypted console variants", "mission-specific event semantics"]
+    unresolved = ["encrypted console variants", "mission-specific event semantics"]
+    if not any(item.get("format") == "RDR resource script" and item.get("valid") for item in headers):
+        unresolved.insert(0, "script header/code-block boundaries")
     if not native_names:
         unresolved.insert(0, "native hash/name table")
-    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes validated; native hashes resolved when an optional database is supplied; signature checks are evidence-only; control-flow edges are bounded references, not a complete decompilation", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "nativeTable": native_table, "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["nativeIndex"])), "signatureMismatchCount": signature_mismatches, "callReferences": call_references[:4096], "functions": functions, "unresolved": unresolved}
+    return {"format": "RDR VM evidence", "confidence": "opcode names/sizes, embedded function boundaries, bounded internal Call2 graph, and source-order mission trace validated; resolved native/resource names receive lexical domain hints only; signature checks are evidence-only; control-flow edges are bounded references, not a complete decompilation", "imageBase": "0x50000000", "pointerCount": len(pointers), "pointers": pointers[:1024], "headerCandidates": header_candidates, "headers": headers, "functionMarkerStarts": discovered_function_starts[:4096], "functionCount": len(functions), "nativeTable": native_table, "nativeUsage": sorted(native_usage.values(), key=lambda item: (-item["count"], item["nativeIndex"])), "nativeDomainUsage": native_domain_usage, "domainUsage": domain_usage, "functionDomainUsage": function_domain_usage, "missionTrace": mission_trace, "signatureMismatchCount": signature_mismatches, "callReferences": call_references[:4096], "callGraph": call_graph, "callGraphEdgeCount": len(call_graph), "callGraphResolvedCallCount": sum(edge["count"] for edge in call_graph), "callGraphUnresolvedCallCount": unresolved_call_count, "functions": functions, "unresolved": unresolved}
 
 
 def strings(data: bytes) -> list[dict[str, Any]]:
@@ -376,6 +908,7 @@ def decode_rbf0(data: bytes) -> dict[str, Any]:
         grouped.setdefault(semantic_bucket(item["value"]), []).append(item)
     types = [item["value"] for item in values if item["value"].startswith("rage__cutf")]
     events = [item for item in values if item["value"].startswith("rage__cutfObjectIdEvent9")]
+    typed_records = build_typed_record_candidates(values)
     return {
         "format": "RBF0",
         "confidence": "verified container and labels; scalar encodings remain raw",
@@ -393,6 +926,8 @@ def decode_rbf0(data: bytes) -> dict[str, Any]:
             "propLabels": len(grouped.get("prop", [])),
         },
         "labels": grouped,
+        "typedRecordCandidates": typed_records,
+        "typedRecordCount": len(typed_records),
         "unresolved": [
             "numeric property payloads are preserved as bytes until the RBF value-tag table is validated",
             "event timing and camera transforms require decoding the typed record stream",
@@ -418,33 +953,166 @@ def decode_xml(data: bytes) -> dict[str, Any]:
                     except ValueError:
                         attrs[key] = value
         elements.append({"tag": element.tag, "attributes": attrs})
+    typed_records = build_typed_record_candidates(
+        [{"offset": index, "value": element.get("tag")} for index, element in enumerate(elements)]
+    )
     return {
         "format": "XML",
         "confidence": "verified XML element and attribute values",
         "root": root.tag,
         "elementCount": len(elements),
         "elements": elements,
+        "typedRecordCandidates": typed_records,
+        "typedRecordCount": len(typed_records),
     }
 
 
+def rsc85_layout(data: bytes) -> dict[str, Any] | None:
+    """Decode the RSC85 page counts needed to locate the object section.
+
+    RSC85 flag fields are little-endian in the PC/Switch release.  The page
+    counts select 512 KiB, 256 KiB, ... 4 KiB pages; the final catch-all group
+    uses the smallest page size needed by the remaining virtual size.  This
+    mirrors Magic-RDR's ``RSC85_PageSizesVirtual`` and ``RSC85_ObjectStart``
+    logic without attempting to infer physical-page mappings.
+    """
+    if len(data) < 16 or data[:4] not in {b"RSC\x85", b"RSC\x86"}:
+        return None
+    flag1, flag2 = struct.unpack_from("<II", data, 8)
+    virtual_counts = [
+        (flag1 >> 14) & 0x3,
+        (flag1 >> 8) & 0x3F,
+        flag1 & 0xFF,
+    ]
+    physical_counts = [
+        (flag1 >> 28) & 0x7,
+        (flag1 >> 24) & 0xF,
+        (flag1 >> 16) & 0xFF,
+    ]
+    object_start_page = (flag2 >> 28) & 0x7
+    object_start_page_size = 4096 << object_start_page
+    total_virtual = (flag2 & 0x3FFF) << 12
+    total_physical = ((flag2 >> 14) & 0x3FFF) << 12
+
+    pages: list[int] = []
+    remaining = total_virtual
+    page_size = 524288
+    for group, count in enumerate((*virtual_counts, 2**31 - 1)):
+        for _ in range(count):
+            if remaining <= 0:
+                break
+            while page_size > remaining:
+                page_size >>= 1
+            pages.append(page_size)
+            remaining -= page_size
+        page_size >>= 1
+        if remaining <= 0:
+            break
+    object_start = 0
+    for size in pages:
+        if size == object_start_page_size:
+            break
+        object_start += size
+    else:
+        object_start = 0
+    return {
+        "flag1": f"0x{flag1:08X}",
+        "flag2": f"0x{flag2:08X}",
+        "virtualPageCounts": virtual_counts,
+        "physicalPageCounts": physical_counts,
+        "objectStartPage": object_start_page,
+        "objectStartPageSize": object_start_page_size,
+        "totalVirtualBytes": total_virtual,
+        "totalPhysicalBytes": total_physical,
+        "virtualPageSizes": pages,
+        "objectStart": object_start,
+        "status": "validated-rsc85-virtual-page-layout",
+    }
+
+
+def expand_rsc85_payload(data: bytes) -> bytes | None:
+    """Return the expanded RSC85 v2 virtual payload when it is available."""
+    if data[:4] not in {b"RSC\x85", b"RSC\x86"} or len(data) < 16:
+        return None
+    version = struct.unpack_from("<I", data, 4)[0]
+    if version != 2 or zstandard is None:
+        return None
+    header_length = 16
+    transformed = decrypt_payload(data[header_length:])
+    if transformed[:4] != b"\x28\xb5\x2f\xfd":
+        return None
+    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(transformed)) as reader:
+        return reader.read()
+
+
 def decode(data: bytes, native_names: dict[int, str] | None = None,
-           native_metadata: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
+           native_metadata: dict[int, dict[str, Any]] | None = None,
+           object_start: int | None = None) -> dict[str, Any]:
     if data[:4] == b"RBF0":
         return decode_rbf0(data)
     if data[:4] in RSC_MAGICS:
         version = struct.unpack_from("<I", data, 4)[0] if len(data) >= 8 else None
-        report: dict[str, Any] = {"format": "RSC", "confidence": "verified RSC wrapper", "magic": data[:4].decode("latin1"), "version": version, "actualSize": len(data)}
+        header_length = 12 if data[4:5] in {b"\x05", b"\x06"} else 16
+        payload = data[min(header_length, len(data)):]
+        report: dict[str, Any] = {
+            "format": "RSC",
+            "confidence": "verified RSC wrapper; payload bytes preserved exactly",
+            "magic": data[:4].decode("latin1"),
+            "versionWord": version,
+            "systemFlags": struct.unpack_from("<I", data, 8)[0] if len(data) >= 12 else None,
+            "graphicsFlags": struct.unpack_from("<I", data, 12)[0] if len(data) >= 16 else None,
+            "headerLength": header_length,
+            "actualSize": len(data),
+            "payloadOffset": header_length,
+            "payloadSize": len(payload),
+            "payloadSha256": hashlib.sha256(payload).hexdigest().upper(),
+            "payloadPrefixHex": payload[:64].hex().upper(),
+            "expectedExpandedSegments": expanded_segments(data, data[:4], header_length),
+        }
+        layout = rsc85_layout(data)
+        if layout is not None:
+            report["rsc85Layout"] = layout
+        transformed_payload = payload
+        # RSC85/RSC86 version 2 resources in the PC release apply the
+        # established Magic-RDR AES-256-ECB transform sixteen times to each
+        # complete block before the compression frame is exposed.  Keep the
+        # original payload fields above so the package remains reproducible,
+        # then record the transformed bytes used for semantic inspection.
+        if data[:4] in {b"RSC\x85", b"RSC\x86"} and version == 2:
+            try:
+                transformed_payload = decrypt_payload(payload)
+                report["payloadEncryption"] = {
+                    "format": "AES-256-ECB",
+                    "passes": 16,
+                    "keyId": "Magic-RDR-AppGlobals.EncryptionKey",
+                    "inputSize": len(payload),
+                    "outputSize": len(transformed_payload),
+                    "transformedPayloadSha256": hashlib.sha256(transformed_payload).hexdigest().upper(),
+                    "transformedPayloadPrefixHex": transformed_payload[:64].hex().upper(),
+                }
+            except Exception as exc:
+                report["decryptionError"] = str(exc)
         if zstandard is not None:
             try:
-                payload = data[12 if data[:4] in {b"RSC\x05", b"RSC\x06"} else 16:]
-                with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(payload)) as reader:
+                with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(transformed_payload)) as reader:
                     expanded = reader.read()
                 report["expandedSize"] = len(expanded)
-                report["payload"] = decode(expanded, native_names, native_metadata)
+                report["expandedSha256"] = hashlib.sha256(expanded).hexdigest().upper()
+                report["compression"] = {
+                    "format": "Zstandard",
+                    "compressedSize": len(transformed_payload),
+                    "expandedSize": len(expanded),
+                }
+                report["payload"] = decode(
+                    expanded,
+                    native_names,
+                    native_metadata,
+                    object_start=layout["objectStart"] if layout is not None else None,
+                )
                 return report
             except Exception as exc:
                 report["decompressionError"] = str(exc)
-        report["unresolved"] = ["payload compression/resource graph not decoded; install zstandard for RSC05/RSC85 expansion"]
+        report["unresolved"] = ["RSC page/resource-graph compression or encryption", "mission VM header and opcode stream", "event timing, camera transforms, AI arguments, and audio codec fields"]
         return report
     if data.lstrip().startswith(b"<?xml") or data.lstrip().startswith(b"<default"):
         return decode_xml(data)
@@ -470,13 +1138,66 @@ def decode(data: bytes, native_names: dict[int, str] | None = None,
     for offset in range(0, len(data) - 3, 4):
         opcode = data[offset]
         histogram[f"0x{opcode:02X}"] = histogram.get(f"0x{opcode:02X}", 0) + 1
-    vm = decode_vm(data, native_names=native_names, native_metadata=native_metadata)
+    vm = decode_vm(data, native_names=native_names, native_metadata=native_metadata, object_start=object_start)
+    has_valid_script = any(item.get("valid") for item in vm.get("headers", []))
+    resource_hints = resource_domain_report(identifiers)
+    typed_records = build_typed_record_candidates(identifiers)
+    trace_correlation = correlate_trace_to_records(vm.get("missionTrace", {}), typed_records)
+    mission_trace = vm.get("missionTrace", {})
+    if isinstance(mission_trace, dict):
+        mission_trace = dict(mission_trace)
+        mission_trace["resourceCorrelation"] = trace_correlation
     return {
-        "format": "raw", "confidence": "verified byte stream and printable identifiers only", "size": len(data),
+        "format": "raw",
+        "confidence": "validated RDR resource-script header and bounded bytecode stream" if has_valid_script else "verified byte stream and printable identifiers only",
+        "size": len(data),
         "strings": found, "semanticCounts": {"identifiers": len(identifiers), "animationIdentifiers": sum("_" in item["value"] and any(item["value"].lower().startswith(prefix) for prefix in ("air_", "grd_", "gent_", "gped_", "zomb_")) for item in identifiers)},
         "identifiers": identifiers,
+        "resourceDomainHints": resource_hints,
+        "missionDomainCorrelation": mission_domain_correlation(resource_hints, vm),
+        "typedRecordCandidates": typed_records,
+        "typedRecordCount": len(typed_records),
+        "missionTrace": mission_trace,
+        "missionTraceCorrelation": trace_correlation,
         "vmEvidence": {"imageBase": "0x50000000 (candidate)", "headerPointers": pointers, "wordOpcodeHistogram": dict(sorted(histogram.items(), key=lambda pair: (-pair[1], pair[0]))[:64]), "disassembly": vm},
         "unresolved": ["mission VM opcode semantics and typed arguments require an independently validated opcode table"]
+    }
+
+
+def rsc_segment_size(flags: int) -> int:
+    """Decode the packed RSC page-count field into the expected segment size."""
+    base_size = 0x200 << (flags & 0xF)
+    pages = (
+        ((flags >> 27) & 1)
+        + (((flags >> 26) & 1) << 1)
+        + (((flags >> 25) & 1) << 2)
+        + (((flags >> 24) & 1) << 3)
+        + (((flags >> 17) & 0x7F) << 4)
+        + (((flags >> 11) & 0x3F) << 5)
+        + (((flags >> 7) & 0xF) << 6)
+        + (((flags >> 5) & 0x3) << 7)
+        + (((flags >> 4) & 1) << 8)
+    )
+    return base_size * pages
+
+
+def expanded_segments(data: bytes, magic: bytes, header_length: int) -> dict[str, Any]:
+    """Return page-size evidence without applying RSC05 math to RSC85."""
+    if magic in {b"RSC\x85", b"RSC\x86"}:
+        return {
+            "systemBytes": None,
+            "graphicsBytes": None,
+            "totalBytes": None,
+            "status": "validated-rsc85-extended-flags; physical-page-mapping-unresolved",
+            "formula": "RSC85/RSC86 virtual pages and object start are decoded from extended flags; physical page mapping is resource-specific",
+        }
+    system_bytes = rsc_segment_size(struct.unpack_from("<I", data, 8)[0]) if len(data) >= 12 else None
+    graphics_bytes = rsc_segment_size(struct.unpack_from("<I", data, 12)[0]) if len(data) >= 16 else None
+    return {
+        "systemBytes": system_bytes,
+        "graphicsBytes": graphics_bytes,
+        "totalBytes": system_bytes + graphics_bytes if isinstance(system_bytes, int) and isinstance(graphics_bytes, int) else None,
+        "status": "legacy-rsc05-rsc06-bitfield-formula",
     }
 
 
@@ -484,13 +1205,47 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("resource", type=Path)
     parser.add_argument("-o", "--output", type=Path)
+    parser.add_argument("--expanded-output", type=Path, help="Write the expanded RSC85 virtual payload when the AES/Zstandard path succeeds")
+    parser.add_argument("--trace-output", type=Path, help="Write the bounded source-order mission trace as a separate JSON file")
     parser.add_argument("--native-db", type=Path, help="Optional RDR1 native hash database JSON")
     args = parser.parse_args()
     native_metadata, native_path = load_native_database_metadata(args.native_db)
     native_names = {native_hash: item["name"] for native_hash, item in native_metadata.items() if item.get("name")}
     report = decode(args.resource.read_bytes(), native_names, native_metadata)
-    report["nativeDatabase"] = {"path": native_path, "count": len(native_metadata)}
+    if args.expanded_output:
+        try:
+            expanded = expand_rsc85_payload(args.resource.read_bytes())
+            if expanded is None:
+                report["expandedPayloadExport"] = {"status": "not-available"}
+            else:
+                args.expanded_output.parent.mkdir(parents=True, exist_ok=True)
+                args.expanded_output.write_bytes(expanded)
+                report["expandedPayloadExport"] = {
+                    "status": "written",
+                    "byteLength": len(expanded),
+                    "sha256": hashlib.sha256(expanded).hexdigest().upper(),
+                }
+        except Exception as exc:
+            report["expandedPayloadExport"] = {"status": "error", "error": str(exc)}
+    native_report: dict[str, Any] = {"path": native_path, "count": len(native_metadata)}
+    if native_path:
+        try:
+            if Path(native_path).stat().st_size > 128 * 1024 * 1024:
+                native_report["status"] = "skipped-too-large-for-bounded-json-read"
+        except OSError:
+            native_report["status"] = "unavailable"
+    report["nativeDatabase"] = native_report
     report["source"] = str(args.resource)
+    if args.trace_output:
+        trace = report.get("missionTrace")
+        if not isinstance(trace, dict) and isinstance(report.get("payload"), dict):
+            trace = report["payload"].get("missionTrace")
+        if isinstance(trace, dict) and trace.get("format") == "RDR mission trace":
+            args.trace_output.parent.mkdir(parents=True, exist_ok=True)
+            args.trace_output.write_text(json.dumps(trace, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            report["missionTraceExport"] = {"status": "written", "file": str(args.trace_output), "eventCount": trace.get("eventCount", 0)}
+        else:
+            report["missionTraceExport"] = {"status": "not-available", "reason": "no validated VM trace was produced"}
     encoded = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

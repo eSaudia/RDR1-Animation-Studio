@@ -11,6 +11,8 @@ from pathlib import Path
 
 import zstandard
 
+from rsc85_crypto import decrypt_payload
+
 
 RSC05 = b"RSC\x05"
 RSC06 = b"RSC\x06"
@@ -20,9 +22,14 @@ RSC86 = b"RSC\x86"
 
 def unpack(data: bytes) -> bytes:
     if len(data) < 12 or data[:4] not in {RSC05, RSC06, RSC85, RSC86}:
-        raise ValueError("Input is not an RDR1 RSC05/RSC85 resource.")
+        raise ValueError("Input is not an RDR1 RSC resource.")
     header_size = 16 if data[:4] in {RSC85, RSC86} else 12
     payload = data[header_size:]
+    if data[:4] in {RSC85, RSC86}:
+        version = struct.unpack_from("<I", data, 4)[0]
+        if version != 2:
+            raise ValueError(f"Unsupported RSC85/RSC86 version {version}; only v2 AES resources are validated.")
+        payload = decrypt_payload(payload)
     if payload.startswith(b"\x28\xB5\x2F\xFD"):
         with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(payload)) as reader:
             return reader.read()

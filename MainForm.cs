@@ -36,13 +36,19 @@ internal sealed class MainForm : Form
     private readonly List<CharacterChoice> characters = [];
     private GameLibrary? gameLibrary;
     private IReadOnlyDictionary<uint, string> archiveNames = new Dictionary<uint, string>();
-    private bool dark = true, busy, ascending = true;
+    private bool dark = true, busy, ascending = true, closeRequested;
     private CancellationTokenSource? operation;
     private string? blender;
     private readonly AnimationPreview preview = new() { Dock = DockStyle.Fill };
     private readonly System.Windows.Forms.Timer previewTimer = new() { Interval = 450 };
     private CancellationTokenSource? previewOperation;
     private int previewVersion;
+    // Python discovery used to recursively scan every runtime directory on
+    // every operation.  Keep the result for this process so a second decode
+    // starts immediately, and probe it off the UI thread where needed.
+    private static readonly object pythonProbeLock = new();
+    private static bool pythonProbeComplete;
+    private static string? pythonPath;
     private static string ToolPath => Path.Combine(AppContext.BaseDirectory, "Tools", "WasInspector");
     internal sealed record SourceFile(string File, string Label);
     private sealed record ArchiveStamp(string Path, long Length, long LastWriteUtcTicks);
@@ -109,9 +115,27 @@ internal sealed class MainForm : Form
         BuildScenePage();
         body.Controls.Add(libraryPage); body.Controls.Add(scenePage); body.Controls.Add(packPage); body.Controls.Add(infoPage); body.Controls.Add(summary); body.Controls.Add(top);
         Controls.Add(body); Controls.Add(nav); Controls.Add(status);
-        FormClosing += (_, e) => { if (busy) { operation?.Cancel(); e.Cancel = true; status.Text = "Cancelling… close again when stopped."; } };
+        FormClosing += (_, e) =>
+        {
+            if (!busy || closeRequested) return;
+            closeRequested = true;
+            e.Cancel = true;
+            operation?.Cancel();
+            status.Text = "Cancelling operation and closing…";
+            _ = CloseWhenIdleAsync();
+        };
         Theme();
         FormClosed += (_, _) => { previewTimer.Stop(); previewTimer.Dispose(); previewOperation?.Cancel(); };
+    }
+    private async Task CloseWhenIdleAsync()
+    {
+        try
+        {
+            while (busy) await Task.Delay(50);
+            if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(Close));
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
     }
     private static Button Button(string label, EventHandler click) {
         string text = label[(label.IndexOf(' ') + 1)..].Trim();
@@ -179,7 +203,7 @@ internal sealed class MainForm : Form
         title.Text = page == "Library" ? "Animation library" : page;
         libraryPage.Visible = page == "Library"; scenePage.Visible = page == "Scenes"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !scenePage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
-        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.10 · Animation Lab\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
+        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.12 · Mission Trace & Resource Correlation\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nMission reports now include bounded VM traces and conservative typed-resource candidates; unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") {
             string inventory = gameLibrary is null ? "No game folder scanned yet." :
                 $"Mission resource inventory (identified, not decoded):\n" +
@@ -192,10 +216,12 @@ internal sealed class MainForm : Form
                 "These counts are a safe inventory only; binary mission decoding is not silently substituted.\n\n";
             info.Text = "SCAN REPORT\n\n" + inventory + string.Join("\n", problems) + "\n\n" + string.Join("\n", clips.Where(c => c.Status != "Supported").Select(c => c.Set + " / " + c.Name + ": " + c.Status));
             var decode = Button("◈ Decode resource semantics…", async (_, _) => await DecodeResourceAsync()); decode.Dock = DockStyle.Bottom; infoPage.Controls.Add(decode);
+            var oneMission = Button("▣ Decode one mission package…", async (_, _) => await DecodeOneMissionAsync()); oneMission.Dock = DockStyle.Bottom; infoPage.Controls.Add(oneMission);
             var vmIndex = Button("▣ Build VM header index…", async (_, _) => await BuildVmIndexAsync()); vmIndex.Dock = DockStyle.Bottom; infoPage.Controls.Add(vmIndex);
             var importNative = Button("⌘ Import native database…", async (_, _) => await ImportNativeDatabaseAsync()); importNative.Dock = DockStyle.Bottom; infoPage.Controls.Add(importNative);
             var usage = Button("▤ Explore native usage…", async (_, _) => await ExploreNativeUsageAsync()); usage.Dock = DockStyle.Bottom; infoPage.Controls.Add(usage);
             var scripts = Button("▥ Explore VM scripts…", async (_, _) => await ExploreVmScriptsAsync()); scripts.Dock = DockStyle.Bottom; infoPage.Controls.Add(scripts);
+            var json = Button("▤ Open JSON report…", async (_, _) => await OpenJsonViewerAsync()); json.Dock = DockStyle.Bottom; infoPage.Controls.Add(json);
         }
         else if (page == "Import") {
             info.Text = "BLENDER → WAS\n\nSelect one supported clip in Library, then choose its edited Blender file below.\n\nExperimental import retains the original duration, skeleton and storage layout. Changes that cannot be represented safely are rejected with an explanation.\n\nThe output is a new WAS file with a validation report. Installation into game archives is not automatic.\n";
@@ -214,7 +240,7 @@ internal sealed class MainForm : Form
         {
             // Prefer the bundled Python helper when available: it can expand Zstandard
             // RSC payloads (including mission resources) before the native fallback.
-            string? python = FindWorkingPython();
+            string? python = await Task.Run(FindWorkingPython);
             string semanticScript = Path.Combine(ToolPath, "resource_semantics.py");
             if (python is not null && File.Exists(semanticScript))
             {
@@ -225,7 +251,8 @@ internal sealed class MainForm : Form
                     if (nativeDb is not null) { semanticArgs.Add("--native-db"); semanticArgs.Add(nativeDb); }
                     await Execute(python, semanticArgs.ToArray(), CancellationToken.None, true);
                     status.Text = "Semantic report written · " + Path.GetFileName(save.FileName);
-                    MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.", "Semantic decode complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.\n\nOpen it in the Raw / Structured JSON viewer now?", "Semantic decode complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                        ShowJsonReport(save.FileName);
                     return;
                 }
                 catch { /* Native decoder below still provides a useful report. */ }
@@ -234,7 +261,8 @@ internal sealed class MainForm : Form
             string json = ResourceSemantics.DecodeToJson(bytes, Path.GetFullPath(open.FileName));
             await File.WriteAllTextAsync(save.FileName, json + Environment.NewLine);
             status.Text = "Semantic report written · " + Path.GetFileName(save.FileName);
-            MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.", "Semantic decode complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (MessageBox.Show(this, "Decoded verified resource semantics to:\n\n" + save.FileName + "\n\nUnknown fields are marked unresolved instead of being guessed.\n\nOpen it in the Raw / Structured JSON viewer now?", "Semantic decode complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                ShowJsonReport(save.FileName);
         }
         catch (Exception ex) { MessageBox.Show(this, "Could not decode resource:\n" + ex.Message, "Semantic decode", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
@@ -250,7 +278,7 @@ internal sealed class MainForm : Form
         if (save.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token =>
         {
-            string? python = FindWorkingPython();
+            string? python = await Task.Run(FindWorkingPython, token);
             string batchScript = Path.Combine(ToolPath, "mission_vm_batch.py");
             if (python is null || !File.Exists(batchScript)) throw new FileNotFoundException("Python 3.12 is required for the VM indexer.");
             string? nativeDb = FindNativeDatabase();
@@ -276,13 +304,265 @@ internal sealed class MainForm : Form
                 if (nativeDb is not null) { batchArgs.Add("--native-db"); batchArgs.Add(nativeDb); }
                 await Execute(python, batchArgs.ToArray(), token, true);
                 status.Text = "VM index written · " + Path.GetFileName(save.FileName);
-                MessageBox.Show(this, "Mission VM index written to:\n\n" + save.FileName + "\n\nOnly validated script headers are counted as decoded.", "VM index complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (MessageBox.Show(this, "Mission VM index written to:\n\n" + save.FileName + "\n\nOnly validated script headers are counted as decoded.\n\nOpen it in the Raw / Structured JSON viewer now?", "VM index complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    ShowJsonReport(save.FileName);
             }
             finally
             {
                 try { Directory.Delete(tempRoot, true); } catch { }
             }
         });
+    }
+    private async Task DecodeOneMissionAsync()
+    {
+        if (busy) return;
+        if (gameLibrary is null || gameLibrary.MissionScripts.Count == 0)
+        {
+            MessageBox.Show(this, "Choose a game folder first so the mission resource inventory is available.", "Single mission decode");
+            return;
+        }
+
+        var candidates = gameLibrary.MissionScripts
+            .OrderBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(asset => asset.InternalPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        using var picker = new Form { Text = "Choose one mission resource", Size = new Size(1120, 640), MinimumSize = new Size(760, 440), StartPosition = FormStartPosition.CenterParent };
+        var filter = new TextBox { Width = 420, Height = 30, PlaceholderText = "Filter by name, archive, or internal path…" };
+        var group = new ComboBox { Width = 170, DropDownStyle = ComboBoxStyle.DropDownList };
+        group.Items.AddRange(["All scripts", "Mission folders", "DLC scripts", "Common scripts", "Item / brain scripts", "Other"]);
+        group.SelectedIndex = 0;
+        var sort = new ComboBox { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList };
+        sort.Items.AddRange(["Name", "Path", "Size"]); sort.SelectedIndex = 0;
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, WrapContents = false, Padding = new Padding(8, 7, 8, 0) };
+        toolbar.Controls.Add(new Label { Text = "Search", AutoSize = true, Padding = new Padding(0, 5, 4, 0) }); toolbar.Controls.Add(filter);
+        toolbar.Controls.Add(new Label { Text = "Group", AutoSize = true, Padding = new Padding(14, 5, 4, 0) }); toolbar.Controls.Add(group);
+        toolbar.Controls.Add(new Label { Text = "Sort", AutoSize = true, Padding = new Padding(14, 5, 4, 0) }); toolbar.Controls.Add(sort);
+        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, HorizontalScrollbar = true, FormattingEnabled = true };
+        var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 7, 8, 0) };
+        var decode = Button("✓ Decode selected mission", (_, _) =>
+        {
+            if (list.SelectedItem is null) { MessageBox.Show(picker, "Select one mission resource first.", "Single mission decode"); return; }
+            picker.DialogResult = DialogResult.OK;
+        });
+        var cancel = Button("× Cancel", (_, _) => picker.DialogResult = DialogResult.Cancel);
+        footer.Controls.Add(cancel); footer.Controls.Add(decode);
+        void RefreshChoices()
+        {
+            string query = filter.Text.Trim();
+            string selectedGroup = group.SelectedItem as string ?? "All scripts";
+            static string Group(GameAsset asset)
+            {
+                string path = (asset.Name + "/" + asset.InternalPath).ToLowerInvariant();
+                if (path.Contains("/missions/") || path.Contains("\\missions\\") || path.Contains("mission")) return "Mission folders";
+                if (path.Contains("/dlc/") || path.Contains("\\dlc\\")) return "DLC scripts";
+                if (path.Contains("commonscripts")) return "Common scripts";
+                if (path.Contains("itemscripts") || path.Contains("gringobrainscripts")) return "Item / brain scripts";
+                return "Other";
+            }
+            IEnumerable<GameAsset> filtered = candidates.Where(asset =>
+                (query.Length == 0 || asset.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || asset.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase) || asset.InternalPath.Contains(query, StringComparison.OrdinalIgnoreCase)) &&
+                (selectedGroup == "All scripts" || Group(asset) == selectedGroup));
+            var visible = (sort.SelectedItem as string) switch
+            {
+                "Path" => filtered.OrderBy(asset => asset.InternalPath, StringComparer.OrdinalIgnoreCase).ThenBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+                "Size" => filtered.OrderByDescending(asset => asset.Size).ThenBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+                _ => filtered.OrderBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase).ThenBy(asset => asset.InternalPath, StringComparer.OrdinalIgnoreCase).ToArray()
+            };
+            // Keep the asset object as the selected item, while formatting a useful
+            // human-readable row. Binding DisplayMember directly hides the name and
+            // archive context, which makes it too easy to select the wrong script.
+            list.DataSource = null;
+            list.Items.Clear();
+            list.Items.AddRange(visible);
+            if (visible.Length > 0) list.SelectedIndex = 0;
+        }
+        filter.TextChanged += (_, _) => RefreshChoices(); group.SelectedIndexChanged += (_, _) => RefreshChoices(); sort.SelectedIndexChanged += (_, _) => RefreshChoices();
+        list.Format += (_, e) =>
+        {
+            if (e.ListItem is GameAsset asset)
+                e.Value = $"{asset.Name}  ·  {Path.GetFileName(asset.ArchivePath)}  ·  {asset.InternalPath}  ·  {asset.Size:N0} bytes";
+        };
+        picker.Controls.Add(list); picker.Controls.Add(toolbar); picker.Controls.Add(footer); picker.AcceptButton = decode; picker.CancelButton = cancel; ThemeDialog(picker); RefreshChoices();
+        if (picker.ShowDialog(this) != DialogResult.OK || list.SelectedItem is not GameAsset assetToDecode) return;
+
+        using var save = new SaveFileDialog { Title = "Save single-mission semantic report", Filter = "JSON report|*.json", FileName = Path.GetFileNameWithoutExtension(assetToDecode.Name) + ".mission.semantics.json", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            status.Text = "Locating Python decoder…";
+            string? python = await Task.Run(FindWorkingPython, token);
+            string semanticScript = Path.Combine(ToolPath, "resource_semantics.py");
+            byte[] bytes = GameLibrary.Extract(assetToDecode, archiveNames);
+            byte[]? expandedPayload = null;
+            if (python is not null && File.Exists(semanticScript))
+            {
+                string tempRoot = Path.Combine(Path.GetTempPath(), "RDR1AnimationStudio-single-vm-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tempRoot);
+                try
+                {
+                    string resource = Path.Combine(tempRoot, "mission.bin");
+                    string expandedFile = Path.Combine(tempRoot, "mission.expanded.bin");
+                    await File.WriteAllBytesAsync(resource, bytes, token);
+                    var args = new List<string> { semanticScript, resource, "--output", save.FileName, "--expanded-output", expandedFile };
+                    string? nativeDb = FindNativeDatabase();
+                    if (nativeDb is not null) { args.Add("--native-db"); args.Add(nativeDb); }
+                    await Execute(python, args.ToArray(), token, true);
+                    if (File.Exists(expandedFile)) expandedPayload = await File.ReadAllBytesAsync(expandedFile, token);
+                }
+                finally { try { Directory.Delete(tempRoot, true); } catch { } }
+            }
+            else
+            {
+                // The native reader still writes a truthful structural report when
+                // Python/zstandard is unavailable; compressed payload details remain
+                // marked unresolved instead of making the operation look like a no-op.
+                string json = ResourceSemantics.DecodeToJson(bytes, assetToDecode.InternalPath);
+                await File.WriteAllTextAsync(save.FileName, json + Environment.NewLine, token);
+            }
+            if (!File.Exists(save.FileName)) throw new IOException("The decoder completed without creating the selected report file.");
+            string packageDirectory = Path.Combine(Path.GetDirectoryName(save.FileName)!, Path.GetFileNameWithoutExtension(assetToDecode.Name) + ".mission-package-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            string manifestPath = MissionPackage.Write(packageDirectory, bytes, assetToDecode.Name, assetToDecode.ArchivePath, assetToDecode.InternalPath, save.FileName, expandedPayload);
+            status.Text = "Single mission package written · " + Path.GetFileName(packageDirectory);
+            FileInfo report = new(save.FileName);
+            if (MessageBox.Show(this, $"Single mission package created.\n\nManifest:\n{manifestPath}\n\nSource bytes, encrypted/decrypted payload previews, expanded payload (when available), manifest, and semantic report were saved together.\nThe report separates validated container/header/bytecode evidence from unresolved mission semantics; no other mission was scanned.\n\nOpen the semantic report in the Raw / Structured JSON viewer now?", "Single mission package complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                ShowJsonReport(report.FullName);
+        });
+    }
+    private async Task OpenJsonViewerAsync()
+    {
+        using var open = new OpenFileDialog { Title = "Open a RDR1 Animation Studio JSON report", Filter = "JSON reports|*.json|All files|*.*", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            // A semantics report can legitimately be gigabytes (for example a
+            // complete audio bank).  ReadAllText + JsonDocument would allocate
+            // several copies and crash the process, so switch to a bounded
+            // streaming viewer for large files.
+            const long largeJsonThreshold = 64L * 1024 * 1024;
+            if (new FileInfo(open.FileName).Length > largeJsonThreshold) ShowLargeJsonViewer(open.FileName);
+            else ShowJsonViewer(open.FileName);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Could not open JSON report:\n" + ex.Message, "JSON viewer", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        await Task.CompletedTask;
+    }
+    private void ShowJsonReport(string path)
+    {
+        try
+        {
+            const long largeJsonThreshold = 64L * 1024 * 1024;
+            if (!File.Exists(path)) throw new FileNotFoundException("The report file was not found.", path);
+            if (new FileInfo(path).Length > largeJsonThreshold) ShowLargeJsonViewer(path); else ShowJsonViewer(path);
+        }
+        catch (Exception ex) { MessageBox.Show(this, "Could not open JSON report:\n" + ex.Message, "JSON viewer", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+    private void ShowLargeJsonViewer(string path)
+    {
+        const int chunkSize = 512 * 1024;
+        var file = new FileInfo(path);
+        using var dialog = new Form { Text = "JSON report · " + Path.GetFileName(path) + " (large file mode)", Size = new Size(1200, 780), MinimumSize = new Size(820, 520), StartPosition = FormStartPosition.CenterParent };
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var rawPage = new TabPage("Raw preview");
+        var rawBox = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, DetectUrls = false, Font = new Font("Cascadia Mono", 10), WordWrap = false, BackColor = Color.FromArgb(22, 26, 33), ForeColor = Color.FromArgb(220, 226, 235), BorderStyle = BorderStyle.None };
+        var controls = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, WrapContents = false, Padding = new Padding(8, 6, 8, 0) };
+        var position = new NumericUpDown { Minimum = 0, Maximum = Math.Max(0, file.Length - 1), Width = 150, ThousandsSeparator = true };
+        var read = Button("Read 512 KB", (_, _) => LoadChunk(position.Value));
+        var first = Button("First", (_, _) => { position.Value = 0; LoadChunk(0); });
+        var lastOffset = Math.Max(0, file.Length - chunkSize);
+        var last = Button("Last", (_, _) => { position.Value = lastOffset; LoadChunk(lastOffset); });
+        controls.Controls.Add(new Label { Text = "Offset", AutoSize = true, Padding = new Padding(0, 5, 4, 0) }); controls.Controls.Add(position); controls.Controls.Add(read); controls.Controls.Add(first); controls.Controls.Add(last);
+        rawPage.Controls.Add(rawBox); rawPage.Controls.Add(controls);
+        var structuredPage = new TabPage("Structured summary");
+        var summaryBox = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 11), BackColor = Color.FromArgb(22, 26, 33), ForeColor = Color.FromArgb(220, 226, 235), Text =
+            "Large JSON safe mode\n\n" +
+            $"File: {file.Name}\nSize: {file.Length:N0} bytes ({file.Length / 1024d / 1024d:N1} MB)\n\n" +
+            "The complete tree is intentionally not materialized because doing so would consume more memory than the report itself.\n\n" +
+            "Use Raw preview to inspect any 512 KB window. Smaller reports still use the full syntax-colored raw view and expandable structured tree." };
+        structuredPage.Controls.Add(summaryBox); tabs.TabPages.Add(rawPage); tabs.TabPages.Add(structuredPage);
+        var footer = new Label { Dock = DockStyle.Bottom, Height = 30, Text = Path.GetFullPath(path) + "  ·  large-file streaming mode", Padding = new Padding(8, 6, 0, 0), AutoEllipsis = true };
+        dialog.Controls.Add(tabs); dialog.Controls.Add(footer); ThemeDialog(dialog);
+        void LoadChunk(decimal requested)
+        {
+            long offset = Math.Clamp((long)requested, 0, Math.Max(0, file.Length - 1));
+            try
+            {
+                byte[] bytes = new byte[Math.Min(chunkSize, (int)Math.Min(int.MaxValue, file.Length - offset))];
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                stream.Seek(offset, SeekOrigin.Begin); int readCount = stream.Read(bytes, 0, bytes.Length);
+                rawBox.Text = Encoding.UTF8.GetString(bytes, 0, readCount);
+                HighlightJson(rawBox);
+                dialog.Text = $"JSON report · {file.Name} · offset {offset:N0}";
+            }
+            catch (Exception ex) { rawBox.Text = "Could not read this section: " + ex.Message; }
+        }
+        LoadChunk(0); dialog.ShowDialog(this);
+    }
+    private void ShowJsonViewer(string path)
+    {
+        string raw = File.ReadAllText(path);
+        using JsonDocument document = JsonDocument.Parse(raw);
+        string pretty = JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true });
+        using var dialog = new Form { Text = "JSON report · " + Path.GetFileName(path), Size = new Size(1200, 780), MinimumSize = new Size(820, 520), StartPosition = FormStartPosition.CenterParent };
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var rawPage = new TabPage("Raw JSON");
+        var rawBox = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, DetectUrls = false, Font = new Font("Cascadia Mono", 10), WordWrap = false, BackColor = Color.FromArgb(22, 26, 33), ForeColor = Color.FromArgb(220, 226, 235), BorderStyle = BorderStyle.None, Text = pretty };
+        HighlightJson(rawBox);
+        rawPage.Controls.Add(rawBox);
+        var treePage = new TabPage("Structured view");
+        var tree = new TreeView { Dock = DockStyle.Fill, HideSelection = false, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 10) };
+        tree.Nodes.Add(JsonTreeNode("root", document.RootElement)); tree.Nodes[0].Expand(); treePage.Controls.Add(tree);
+        tabs.TabPages.Add(rawPage); tabs.TabPages.Add(treePage);
+        var footer = new Label { Dock = DockStyle.Bottom, Height = 30, Text = Path.GetFullPath(path) + "  ·  " + new FileInfo(path).Length.ToString("N0") + " bytes", Padding = new Padding(8, 6, 0, 0), AutoEllipsis = true };
+        dialog.Controls.Add(tabs); dialog.Controls.Add(footer); ThemeDialog(dialog); dialog.ShowDialog(this);
+    }
+    private static TreeNode JsonTreeNode(string label, JsonElement value)
+    {
+        static string Short(string text) => text.Length > 180 ? text[..177] + "…" : text;
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var obj = new TreeNode(label + "  {");
+                foreach (var property in value.EnumerateObject()) obj.Nodes.Add(JsonTreeNode(property.Name, property.Value));
+                obj.Text += "  [" + obj.Nodes.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + " fields]";
+                return obj;
+            case JsonValueKind.Array:
+                var array = new TreeNode(label + "  [" + value.GetArrayLength().ToString(System.Globalization.CultureInfo.InvariantCulture) + " items]");
+                int index = 0; foreach (var item in value.EnumerateArray()) array.Nodes.Add(JsonTreeNode("[" + index++.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]", item));
+                return array;
+            case JsonValueKind.String: return new TreeNode(label + ":  \"" + Short(value.GetString() ?? "") + "\"");
+            case JsonValueKind.Number: return new TreeNode(label + ":  " + value.GetRawText());
+            case JsonValueKind.True: return new TreeNode(label + ":  true");
+            case JsonValueKind.False: return new TreeNode(label + ":  false");
+            case JsonValueKind.Null: return new TreeNode(label + ":  null");
+            default: return new TreeNode(label);
+        }
+    }
+    private static void HighlightJson(RichTextBox box)
+    {
+        // Keep very large reports responsive; they remain fully readable as raw JSON.
+        if (box.TextLength > 1_000_000) return;
+        string text = box.Text; box.SelectAll(); box.SelectionColor = Color.FromArgb(220, 226, 235);
+        int i = 0;
+        while (i < text.Length)
+        {
+            if (text[i] == '"')
+            {
+                int start = i++; bool escaped = false;
+                while (i < text.Length) { char c = text[i++]; if (c == '"' && !escaped) break; escaped = c == '\\' && !escaped ? true : false; if (c != '\\') escaped = false; }
+                int next = i; while (next < text.Length && char.IsWhiteSpace(text[next])) next++;
+                box.Select(start, i - start); box.SelectionColor = next < text.Length && text[next] == ':' ? Color.FromArgb(120, 190, 255) : Color.FromArgb(150, 220, 150);
+                continue;
+            }
+            if (char.IsDigit(text[i]) || (text[i] == '-' && i + 1 < text.Length && char.IsDigit(text[i + 1])))
+            {
+                int start = i++; while (i < text.Length && "0123456789+-.eE".Contains(text[i])) i++;
+                box.Select(start, i - start); box.SelectionColor = Color.FromArgb(255, 205, 120); continue;
+            }
+            if (text.AsSpan(i).StartsWith("true")) { box.Select(i, 4); box.SelectionColor = Color.FromArgb(220, 160, 255); i += 4; continue; }
+            if (text.AsSpan(i).StartsWith("false")) { box.Select(i, 5); box.SelectionColor = Color.FromArgb(220, 160, 255); i += 5; continue; }
+            if (text.AsSpan(i).StartsWith("null")) { box.Select(i, 4); box.SelectionColor = Color.FromArgb(220, 160, 255); i += 4; continue; }
+            i++;
+        }
+        box.Select(0, 0);
     }
     private async Task ImportNativeDatabaseAsync()
     {
@@ -437,7 +717,7 @@ internal sealed class MainForm : Form
     private void BuildScenePage()
     {
         var heading = new Label { Dock = DockStyle.Top, Height = 108, Padding = new Padding(0, 4, 0, 0),
-            Text = "SCENE EXPORTER · PROTOTYPE\n\nIntro sequence sample · 00:24 · 30 FPS\nThe sample preserves the bundled rig's authored walk action and adds blocking roots. Mission scripts, cameras, props and AI are not decoded yet." ,
+            Text = "SCENE PLAYBACK & RENDER\n\nIntro sequence sample · 00:24 · 30 FPS\nExported scenes can be opened in Blender's camera view, played automatically, or rendered to an MP4. Mission scripts, cameras, props and AI are not decoded yet." ,
             Font = new Font("Segoe UI", 13) };
         var timeline = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0), BorderStyle = BorderStyle.FixedSingle };
         timeline.Paint += (_, e) =>
@@ -468,9 +748,12 @@ internal sealed class MainForm : Form
             Clip(2, 7, 16, "React · idle", Color.FromArgb(159, 104, 59)); Clip(2, 16, 24, "Gesture", Color.FromArgb(159, 104, 59));
             Clip(3, 0, 24, "Blackwater street / lighting", Color.FromArgb(102, 91, 135));
         };
-        var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 82, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
+        var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 112, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
         var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
+        var play = Button("▶ Play a Blender scene…", async (_, _) => await PlaySceneAsync()); play.Width = 220;
+        var render = Button("● Render scene to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 220;
         footer.Controls.Add(export);
+        footer.Controls.Add(play); footer.Controls.Add(render);
         footer.Controls.Add(new Label { Text = "Export creates a .blend with visible actor collections, a moving authored walk action, camera markers and timeline events.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
         scenePage.Controls.Add(timeline); scenePage.Controls.Add(footer); scenePage.Controls.Add(heading);
     }
@@ -485,7 +768,42 @@ internal sealed class MainForm : Form
             await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_scene_sample.py"), "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName], token);
             status.Text = "Sample scene exported · " + Path.GetFileName(save.FileName);
             if (MessageBox.Show(this, "Sample scene exported. Open it in Blender now?", "Scene exporter", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
+                LaunchScenePlayback(exe, save.FileName);
+        });
+    }
+    private async Task PlaySceneAsync()
+    {
+        if (busy) return;
+        string? exe = Blender(); if (exe is null) return;
+        using var open = new OpenFileDialog { Title = "Open exported Blender scene", Filter = "Blender scenes|*.blend", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        LaunchScenePlayback(exe, open.FileName);
+        status.Text = "Opened scene in Blender and started playback · " + Path.GetFileName(open.FileName);
+        await Task.CompletedTask;
+    }
+    private void LaunchScenePlayback(string exe, string blend)
+    {
+        string script = Path.Combine(ToolPath, "blender_play_scene.py");
+        var start = new ProcessStartInfo(exe) { UseShellExecute = true };
+        start.ArgumentList.Add(blend); start.ArgumentList.Add("--python"); start.ArgumentList.Add(script); start.ArgumentList.Add("--"); start.ArgumentList.Add("--start"); start.ArgumentList.Add("1");
+        Process.Start(start);
+    }
+    private async Task RenderSceneAsync()
+    {
+        if (busy) return;
+        string? exe = Blender(); if (exe is null) return;
+        using var open = new OpenFileDialog { Title = "Choose Blender scene to render", Filter = "Blender scenes|*.blend", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        using var save = new SaveFileDialog { Title = "Save rendered scene movie", Filter = "MP4 movie|*.mp4", FileName = Path.GetFileNameWithoutExtension(open.FileName) + ".mp4", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            status.Text = "Rendering scene to MP4…";
+            await Execute(exe, ["--background", open.FileName, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_render_scene.py"), "--", "--output", save.FileName], token);
+            if (!File.Exists(save.FileName)) throw new IOException("Blender completed without creating the MP4 file.");
+            FileInfo movie = new(save.FileName);
+            status.Text = $"Scene render complete · {movie.Length:N0} bytes";
+            MessageBox.Show(this, $"Scene rendered successfully.\n\n{movie.FullName}\nSize: {movie.Length:N0} bytes", "Scene render complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
         });
     }
     private void BuildPackPage()
@@ -712,7 +1030,9 @@ internal sealed class MainForm : Form
             await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(selected), token);
             await Python("studio_library.py", ["export", manifest, output, "--blender", exe, "--skeleton", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.skeleton.csv"), "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend")], token);
             status.Text = "Export complete. Review export-report.json for skipped clips.";
-            MessageBox.Show(this, "Saved Blender Actions and export report:\n" + output + "\n\nUnsupported clips are reported without substituting another animation.", "Export complete");
+            string reportPath = Path.Combine(output, "export-report.json");
+            if (MessageBox.Show(this, "Saved Blender Actions and export report:\n" + output + "\n\nUnsupported clips are reported without substituting another animation.\n\nOpen the export report in the JSON viewer now?", "Export complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                ShowJsonReport(reportPath);
         });
     }
     private async Task PreviewSelectedAsync()
@@ -818,22 +1138,80 @@ internal sealed class MainForm : Form
         return string.Join(Environment.NewLine, lines.TakeLast(Math.Min(4, lines.Length)));
     }
     internal static string? FindWorkingPython() {
-        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string root in new[] { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "codex-runtimes"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python") })
-            if (Directory.Exists(root)) foreach (string path in Directory.EnumerateFiles(root, "python.exe", SearchOption.AllDirectories)) candidates.Add(path);
-        string? pathEnvironment = Environment.GetEnvironmentVariable("PATH");
-        if (pathEnvironment is not null) foreach (string directory in pathEnvironment.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) {
-            string path = Path.Combine(directory.Trim(), "python.exe");
-            if (File.Exists(path)) candidates.Add(path);
-        }
-        foreach (string path in candidates) { try {
-            using var p = Process.Start(new ProcessStartInfo(path, "--version") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
-            if (p is not null && p.WaitForExit(3000)) {
-                string version = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                if (version.Contains("Python 3.12", StringComparison.OrdinalIgnoreCase)) return path;
+        lock (pythonProbeLock)
+        {
+            if (pythonProbeComplete) return pythonPath;
+            var candidates = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            void Add(string? candidate)
+            {
+                if (string.IsNullOrWhiteSpace(candidate)) return;
+                try { candidate = Path.GetFullPath(candidate); } catch { return; }
+                if (File.Exists(candidate) && seen.Add(candidate)) candidates.Add(candidate);
             }
-        } catch { } }
-        return null;
+            // PATH is cheap and covers normal Python installations.  The old
+            // implementation recursively walked the entire Codex runtime tree
+            // first, which could make an 8 KB mission take a minute to start.
+            string? pathEnvironment = Environment.GetEnvironmentVariable("PATH");
+            if (pathEnvironment is not null) foreach (string directory in pathEnvironment.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)) Add(Path.Combine(directory.Trim(), "python.exe"));
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string user = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            foreach (string version in new[] { "Python312", "Python313", "Python311" })
+            {
+                Add(Path.Combine(local, "Programs", "Python", version, "python.exe"));
+                Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), version, "python.exe"));
+                Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Python", version, "python.exe"));
+            }
+            // Blender ships a self-contained Python runtime.  It is a useful
+            // zero-install fallback for the bundled inspectors (including
+            // zstandard on current Blender releases), so discover it without
+            // recursively walking the whole Program Files tree.
+            string blenderRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Blender Foundation");
+            if (Directory.Exists(blenderRoot))
+            {
+                try
+                {
+                    foreach (string versionDirectory in Directory.EnumerateDirectories(blenderRoot, "Blender *", SearchOption.TopDirectoryOnly))
+                    {
+                        Add(Path.Combine(versionDirectory, "5.2", "python", "bin", "python.exe"));
+                        foreach (string runtimeDirectory in Directory.EnumerateDirectories(versionDirectory, "*", SearchOption.TopDirectoryOnly))
+                            Add(Path.Combine(runtimeDirectory, "python", "bin", "python.exe"));
+                    }
+                }
+                catch { }
+            }
+            // Only if the quick probes fail, use a bounded-depth fallback for
+            // the bundled runtime.  Enumerating the complete tree is avoided.
+            foreach (string root in new[] { Path.Combine(user, ".cache", "codex-runtimes"), Path.Combine(local, "Programs", "Python") })
+            {
+                if (!Directory.Exists(root)) continue;
+                try
+                {
+                    foreach (string directory in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        Add(Path.Combine(directory, "python.exe"));
+                        foreach (string child in Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly)) Add(Path.Combine(child, "python.exe"));
+                    }
+                }
+                catch { }
+            }
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    using var p = Process.Start(new ProcessStartInfo(candidate, "--version") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
+                    if (p is not null && p.WaitForExit(1500))
+                    {
+                        string version = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                        if (version.Contains("Python 3.12", StringComparison.OrdinalIgnoreCase) ||
+                            version.Contains("Python 3.13", StringComparison.OrdinalIgnoreCase)) { pythonPath = candidate; break; }
+                    }
+                }
+                catch { }
+            }
+            pythonProbeComplete = true;
+            return pythonPath;
+        }
     }
     internal static string? FindNativeDatabase() {
         string? configured = Environment.GetEnvironmentVariable("RDR1_NATIVE_DB");

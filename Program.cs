@@ -101,6 +101,65 @@ internal static class Program
             Console.WriteLine($"extracted={entry.Path}|{args[3]}|size={entry.Size}|resource=0x{entry.ResourceType:X2}");
             return;
         }
+        if (args.Length >= 4 && args[0] == "--extract-rpf-name")
+        {
+            Dictionary<uint, string>? names = args.Length >= 5 ? Rpf6Archive.LoadNames(args[4]) : null;
+            using Rpf6Archive archive = Rpf6Archive.Open(args[1], names);
+            string query = args[2];
+            Rpf6Archive.Entry[] matches = archive.Entries
+                .Where(e => !e.IsDirectory && (e.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || e.Path.Contains(query, StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+            if (matches.Length == 0) throw new FileNotFoundException($"No RPF entry matched '{query}'.");
+            Rpf6Archive.Entry selected = matches[0];
+            File.WriteAllBytes(args[3], archive.Extract(selected));
+            Console.WriteLine($"extracted={selected.Path}|{args[3]}|size={selected.Size}|resource=0x{selected.ResourceType:X2}|flag1=0x{selected.Flag1:X8}|flag2=0x{selected.Flag2:X8}|offset=0x{selected.DataOffset:X}|matches={matches.Length}");
+            return;
+        }
+        if (args.Length >= 4 && args[0] == "--decode-mission")
+        {
+            Dictionary<uint, string>? names = args.Length >= 5 ? Rpf6Archive.LoadNames(args[4]) : null;
+            using Rpf6Archive archive = Rpf6Archive.Open(args[1], names);
+            string query = args[2];
+            Rpf6Archive.Entry[] matches = archive.Entries
+                .Where(e => !e.IsDirectory && (e.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || e.Path.Contains(query, StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+            if (matches.Length == 0) throw new FileNotFoundException($"No RPF entry matched '{query}'.");
+            Rpf6Archive.Entry selected = matches[0];
+            byte[] bytes = archive.Extract(selected);
+            string outputDirectory = Path.GetFullPath(args[3]);
+            string manifest = MissionPackage.Write(outputDirectory, bytes, selected.Name, Path.GetFullPath(args[1]), selected.Path);
+            Console.WriteLine($"package={manifest}|source={selected.Path}|size={bytes.Length}|matches={matches.Length}");
+            return;
+        }
+        if (args.Length >= 4 && args[0] == "--probe-xmem")
+        {
+            // RDR1's legacy XCompress DLL is 32-bit. Run the bundled x86
+            // helper as a child process so a malformed RSC85 candidate cannot
+            // terminate the x64 studio. Syntax:
+            //   --probe-xmem payload.bin expanded-size stream|block [--pad16] [xcompress-directory]
+            string helper = Path.Combine(AppContext.BaseDirectory, "Tools", "XMemProbe", "Rdr1XMemProbe.exe");
+            if (!File.Exists(helper)) throw new FileNotFoundException("The x86 XMem probe helper is missing from the installation.", helper);
+            if (!int.TryParse(args[2], out int expandedSize) || expandedSize <= 0)
+                throw new ArgumentException("expanded-size must be a positive integer.");
+            bool pad16 = args.Skip(4).Any(value => value.Equals("--pad16", StringComparison.OrdinalIgnoreCase));
+            string? suppliedDirectory = args.Skip(4).FirstOrDefault(value => !value.StartsWith("--", StringComparison.Ordinal));
+            string? dllDirectory = suppliedDirectory is null ? null :
+                (File.Exists(suppliedDirectory) ? Path.GetDirectoryName(Path.GetFullPath(suppliedDirectory)) : Path.GetFullPath(suppliedDirectory));
+            if (dllDirectory is not null && !Directory.Exists(dllDirectory)) throw new DirectoryNotFoundException($"XCompress directory not found: {dllDirectory}");
+            var probeArgs = new List<string> { args[1], expandedSize.ToString(System.Globalization.CultureInfo.InvariantCulture), args[3] };
+            if (pad16) probeArgs.Add("--pad16");
+            var start = new ProcessStartInfo { FileName = helper, WorkingDirectory = dllDirectory ?? Path.GetDirectoryName(helper)!, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+            foreach (string value in probeArgs) start.ArgumentList.Add(value);
+            using Process process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the x86 XMem probe helper.");
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (stdout.Length > 0) Console.WriteLine(stdout.TrimEnd());
+            if (stderr.Length > 0) Console.Error.WriteLine(stderr.TrimEnd());
+            Console.WriteLine($"probeExit={process.ExitCode}");
+            Environment.ExitCode = process.ExitCode;
+            return;
+        }
         if (args.Length >= 2 && args[0] == "--probe-game")
         {
             string bundledNames = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt");

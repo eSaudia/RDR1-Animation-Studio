@@ -1,6 +1,6 @@
 ![RDR1 Animation Studio](Assets/release-banner.png)
 
-# RDR1 Animation Studio 0.11 · Animation Lab
+# RDR1 Animation Studio 0.12 · Mission Trace & Resource Correlation
 
 Created by **eSaudia — Creator & Project Owner**.
 
@@ -104,6 +104,15 @@ to `manifest.json`, and provides a validator. Packs are staged for a future Scri
 runtime menu; a loose JSON/WAS folder is not loaded by the game, and no game archive is
 overwritten automatically.
 
+## Scene playback and rendering
+
+The **Scenes** section can open any exported `.blend` in Blender's camera view and
+start its timeline automatically. **Render scene to MP4…** runs Blender in headless
+mode at the scene's own frame range and FPS, writing an H.264 movie without changing
+the source `.blend`. The current intro scene remains a procedural sample: its actor
+motion and shot markers are real Blender data, while mission cameras, props, AI
+tasks, and audio are still future decoded inputs.
+
 ### Faster repeat scans
 
 The first scan of a game folder still has to read its RPF archives and decode each WAS
@@ -128,6 +137,12 @@ directly when you want name resolution:
 ```powershell
 python Tools\WasInspector\resource_semantics.py extracted-resource.bin --output report.semantics.json --native-db Assets\rdr1-natives.json
 ```
+
+If a standalone Python 3.12 install is not present, the desktop app can use
+Blender's bundled Python runtime (current Blender 5.2 builds ship Python 3.13)
+for this decoder. Databases larger than 128 MiB are intentionally not loaded
+into memory; hashes remain in the report and the selected database path is
+preserved so a malformed multi-gigabyte JSON cannot freeze the studio.
 
 The Scan report also provides **Import native database…**. Choose the downloaded
 JSON once and the app stores it at `%LOCALAPPDATA%\RDR1AnimationStudio\natives.json`.
@@ -154,10 +169,126 @@ its validated header/function/call counts, archive, and internal path. It suppor
 the same filter-and-CSV workflow, so high-value script candidates can be triaged
 before attempting deeper reverse-engineering.
 
+For a focused experiment, **Decode one mission…** lets you choose a single
+mission resource from the scanned inventory and writes one `.mission.semantics.json`
+report. It extracts and decodes only that resource, optionally resolves native
+hashes from the configured database, and leaves all other missions untouched.
+For RSC85 v2 resources this now applies the validated AES-256-ECB (16-pass)
+transform, expands the Zstandard frame, and inspects the resource-script header
+before returning bounded VM evidence. This is the recommended first step when
+validating a new VM hypothesis.
+
+The focused decode also creates a sibling `<mission>.mission-package-YYYYMMDD-HHMMSS`
+folder beside the report. It contains the original `.wsc` bytes, an exact
+`payload.bin` slice, a bounded `payload.hex.txt` preview, `mission.semantics.json`,
+and `mission.manifest.json` with archive path, RSC header flags, SHA-256 hashes,
+and an explicit list of unresolved layers. For RSC85 v2 resources it also
+contains `payload.decrypted.bin` and `payload.decrypted.hex.txt`, the exact
+AES-transformed payload used for inspection (the original bytes are preserved).
+When the Python decoder is available it also includes
+`payload.expanded.bin` and `payload.expanded.hex.txt`, the 20,480-byte virtual
+resource after Zstandard expansion. This makes one mission reproducible for
+reverse-engineering. The same package can be generated headlessly with:
+
+```text
+RDR1AnimationStudio.exe --decode-mission <content.rpf> <mission-or-path-query> <output-folder> [ImportedFileNames.txt]
+```
+
+Each package also includes `rsc85.probe.json`. The probe records payload entropy,
+standard compression signatures, aligned page windows, and shape-only LZX header
+candidates. RSC85 v2 entries now record the validated AES transform and decrypted
+Zstandard signature. The semantic report includes the virtual-page/object-start
+layout, resource-script header, code-page table, native table, and bounded
+bytecode instructions. Mission-specific event timing, camera/AI/audio payload
+meanings, and physical-page relocation remain explicitly unresolved.
+
+On the focused `dlc_find_blunderbuss.wsc` sample, this produces a reproducible
+20,480-byte expanded resource with 105 embedded functions, 3,165 decoded
+instructions, 361 bounded branch/call references, and 159 calls resolved to
+another function marker across 120 unique internal call-graph edges. Each
+function now has a generated structural label (`main`/`Function_N`), parameter
+and local counts when the marker provides them, and incoming/outgoing function
+indexes. This is the first concrete VM-structure milestone and provides the
+stable execution map needed for typed mission-resource correlation.
+
+Focused packages now also emit `mission.trace.json`. It is a bounded,
+source-order trace of validated function entries, native calls, internal calls,
+branches, and returns, plus per-function summaries. It distinguishes decoded
+native-table hashes from native indexes that still lack a valid table entry.
+The trace is intentionally not presented as runtime execution: branch conditions, loops, event timing,
+and typed payload fields remain listed as unresolved until those records are
+validated.
+
+The correlation pass adds bounded `typedRecordCandidates` and
+`missionTraceCorrelation` fields to expanded mission reports. Printable labels
+are retained with their source offsets and grouped into conservative camera,
+actor, AI, prop, audio, animation, and timing domains. The correlation report
+only says that a trace domain and a resource-label candidate coexist; it does
+not claim that a label is an object instance or that a native call carries a
+decoded event payload. RBF0/XML reports use the same candidate schema, so the
+cutscene/resource evidence can be compared with the VM trace without inventing
+binary fields. Runtime branch decisions, record identity, transforms, AI task
+arguments, and audio codec data remain explicitly unresolved.
+
+For the focused `dlc_find_blunderbuss.wsc` sample this produces 81 bounded
+record candidates across all seven domains. Because the current local native
+database is over the safe read limit, the trace reports resource candidates but
+does not invent native-name matches; the result is intentionally marked
+`resource-candidate-without-trace-domain-evidence` until a validated native
+table and typed event stream are available.
+
+The following correlation layer is now included in each VM report. When a
+native database supplies a resolved name, calls receive conservative domain
+hints (`camera`, `actor`, `ai`, `prop`, `audio`, `animation`, or `timing`) and
+an archive-wide call-count summary. The containing function is recorded for
+each hint, so the report can show which execution nodes touch a domain.
+Printable identifiers in the expanded resource are grouped into the same review
+domains, with the original names preserved. These are explicitly labelled
+lexical evidence and never convert an unknown hash or payload field into a
+claimed game semantic.
+
+The release also contains a small `Tools\\XMemProbe\\Rdr1XMemProbe.exe` helper for
+the next reverse-engineering step. It is a separate 32-bit process because the
+game's legacy `xcompress32.dll` is 32-bit. Run it explicitly with a candidate
+expanded size and the directory that contains the user's copy of
+`xcompress32.dll`:
+
+```text
+RDR1AnimationStudio.exe --probe-xmem <payload.bin> <expanded-size> stream|block [--pad16] <xcompress-directory>
+```
+
+The helper emits JSON with the native return code, consumed/written sizes,
+output hash and a conservative resource-header check. A failed or crashed
+candidate is isolated to the child process; it is never presented as decoded
+VM data. It is retained for legacy LZX candidates; RSC85 v2 missions use the
+AES/Zstandard path above. The helper's source and the .NET Framework x86 build command are in
+`Tools\\XMemProbe`.
+
+RSC85/86 physical-page relocation is intentionally marked unresolved. Virtual
+page sizing and the object-start offset are now decoded from the extended flags;
+the older RSC05/06 bitfield formula is not applied to these resources because
+doing so yields false expanded sizes for mission payloads.
+
+The same report can be opened with **Open JSON report…**. The viewer provides a
+syntax-colored raw JSON tab and a navigable structured tree tab, so reports do not
+need to be inspected in an external editor.
+
+After an export or decode completes, choose **Open it in the Raw / Structured JSON viewer now?**
+to jump straight to the generated report. Reports larger than 64 MB automatically use a bounded streaming viewer. It shows
+512 KB raw windows (first/last or a chosen byte offset) and a structured safety
+summary instead of loading a multi-gigabyte audio report into memory.
+
+The first mission decode may spend a short time locating the bundled Python
+runtime. That result is cached for the session and subsequent decodes start
+immediately; the decoder also runs off the UI thread so the window remains
+responsive while a report is being written.
+
 After a game-folder scan, **Build VM header index…** extracts the identified
 mission resources to a temporary workspace, expands supported RSC/Zstandard
 payloads, and writes one archive-wide `rdr1-mission-vm-index.json`. The temporary
-files are removed after indexing; only the report is retained.
+files are removed after indexing; only the report is retained. The index now
+also totals unique internal call-graph edges and any resolved-native domain
+hints, while preserving each resource's local graph and identifier hints.
 
 Validated `camera.rpf` entries that contain XML are decoded into typed elements
 and attributes (booleans, integers, floats, references). Validated `RBF0`
@@ -168,8 +299,16 @@ histogram for reverse-engineering comparison. When a payload contains the
 validated RDR script header, the report adds a bounded VM disassembly: opcode byte,
 instruction offset, raw bytes, validated argument width, and control-flow target
 where the format is known. It also records the header signature, code length,
-native/static counts, relative-pointer fields, and code-block starts. The opcode names and size rules are cross-checked
+native/static counts, relative-pointer fields, and code-block starts. RDR's
+embedded `Function` markers are discovered inside each bounded code stream, so
+the report exposes every validated function boundary (not just the first
+function) and records whether each body ended at a return or a safety boundary.
+The complete 0–178 opcode enum is covered, including the post-155 patch,
+reference, and vector instructions. Names and size rules are cross-checked
 against the public RDR backend in [RASM](https://github.com/NativeFunction/RASM).
+The validated static table is also hashed and exposed as bounded little-endian
+initial values (with a non-zero count and truncation flag for unusually large
+tables); the expanded binary remains the lossless source for every value.
 `CallNative` entries now include the encoded parameter/return bits and the raw
 32-bit native-table hash when the header points to a valid table. This milestone
 can also resolve those hashes to names without bundling third-party data: pass
