@@ -117,11 +117,14 @@ invented game seconds: labels marked as lexical candidates remain evidence until
 the binary event/camera payload is independently validated.
 
 The lower scene controls can open any exported `.blend` in Blender's camera view and
-start its timeline automatically. **Render scene to MP4…** runs Blender in headless
-mode at the scene's own frame range and FPS, writing an H.264 movie without changing
-the source `.blend`. The current intro scene remains a procedural sample: its actor
-motion and shot markers are real Blender data, while mission cameras, props, AI tasks,
-and audio are still future decoded inputs.
+start its timeline automatically. **Render current scene to MP4…** uses the last scene
+created or opened in this session, so it no longer asks you to select the same Blender
+file again. It asks only for the destination movie path. If no scene has been opened,
+the button explains that you must export or play a Blender scene first. Rendering runs
+Blender in headless mode at the scene's own frame range and FPS, writing an H.264 movie
+without changing the source `.blend`. The current intro scene remains a procedural
+sample: its actor motion and shot markers are real Blender data, while mission cameras,
+props, AI tasks, and audio are still future decoded inputs.
 
 ### Faster repeat scans
 

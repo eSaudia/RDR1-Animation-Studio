@@ -57,6 +57,7 @@ internal sealed class MainForm : Form
     private List<CutsceneMarker> sceneMarkers = [];
     private int sceneCursor;
     private bool scenePlaying;
+    private string? lastSceneBlend;
     // Python discovery used to recursively scan every runtime directory on
     // every operation.  Keep the result for this process so a second decode
     // starts immediately, and probe it off the UI thread where needed.
@@ -725,6 +726,7 @@ internal sealed class MainForm : Form
             string script = Path.Combine(ToolPath, "blender_authoring_setup.py");
             string preset = authorPreset.SelectedIndex == 1 ? "spider_leap" : "blank";
             await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName, "--name", name, "--frames", authorFrames.Value.ToString(), "--fps", authorFps.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "--preset", preset], token);
+            lastSceneBlend = save.FileName;
             status.Text = "Authoring scene created · " + Path.GetFileName(save.FileName);
             if (MessageBox.Show(this, "Authoring scene created. Open it in Blender now?", "Custom authoring", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
@@ -759,7 +761,7 @@ internal sealed class MainForm : Form
         var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 112, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
         var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
         var play = Button("▶ Play a Blender scene…", async (_, _) => await PlaySceneAsync()); play.Width = 220;
-        var render = Button("● Render scene to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 220;
+        var render = Button("● Render current scene to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 250;
         footer.Controls.Add(export);
         footer.Controls.Add(play); footer.Controls.Add(render);
         footer.Controls.Add(new Label { Text = "The lower controls still open or render a Blender scene. Resource tracks above are evidence-only until camera/event payloads are decoded.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
@@ -982,6 +984,7 @@ internal sealed class MainForm : Form
         await Operation(async token =>
         {
             await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_scene_sample.py"), "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", save.FileName], token);
+            lastSceneBlend = save.FileName;
             status.Text = "Sample scene exported · " + Path.GetFileName(save.FileName);
             if (MessageBox.Show(this, "Sample scene exported. Open it in Blender now?", "Scene exporter", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 LaunchScenePlayback(exe, save.FileName);
@@ -993,6 +996,7 @@ internal sealed class MainForm : Form
         string? exe = Blender(); if (exe is null) return;
         using var open = new OpenFileDialog { Title = "Open exported Blender scene", Filter = "Blender scenes|*.blend", CheckFileExists = true };
         if (open.ShowDialog(this) != DialogResult.OK) return;
+        lastSceneBlend = open.FileName;
         LaunchScenePlayback(exe, open.FileName);
         status.Text = "Opened scene in Blender and started playback · " + Path.GetFileName(open.FileName);
         await Task.CompletedTask;
@@ -1008,14 +1012,18 @@ internal sealed class MainForm : Form
     {
         if (busy) return;
         string? exe = Blender(); if (exe is null) return;
-        using var open = new OpenFileDialog { Title = "Choose Blender scene to render", Filter = "Blender scenes|*.blend", CheckFileExists = true };
-        if (open.ShowDialog(this) != DialogResult.OK) return;
-        using var save = new SaveFileDialog { Title = "Save rendered scene movie", Filter = "MP4 movie|*.mp4", FileName = Path.GetFileNameWithoutExtension(open.FileName) + ".mp4", AddExtension = true, OverwritePrompt = true };
+        string? blend = lastSceneBlend;
+        if (string.IsNullOrWhiteSpace(blend) || !File.Exists(blend))
+        {
+            MessageBox.Show(this, "There is no current Blender scene to render yet.\n\nUse ‘Export sample scene to Blender…’ or ‘Play a Blender scene…’ first. The raw mission resources are not automatically converted into a Blender scene until their camera and event payloads are decoded.", "Render scene", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        using var save = new SaveFileDialog { Title = "Save rendered scene movie", Filter = "MP4 movie|*.mp4", FileName = Path.GetFileNameWithoutExtension(blend) + ".mp4", AddExtension = true, OverwritePrompt = true };
         if (save.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token =>
         {
             status.Text = "Rendering scene to MP4…";
-            await Execute(exe, ["--background", open.FileName, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_render_scene.py"), "--", "--output", save.FileName], token);
+            await Execute(exe, ["--background", blend, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_render_scene.py"), "--", "--output", save.FileName], token);
             if (!File.Exists(save.FileName)) throw new IOException("Blender completed without creating the MP4 file.");
             FileInfo movie = new(save.FileName);
             status.Text = $"Scene render complete · {movie.Length:N0} bytes";
