@@ -8,7 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>RDR1AnimationStudio</AssemblyName>
     <RootNamespace>RDR1AnimationStudio</RootNamespace>
-    <Version>0.15.0</Version>
+    <Version>0.16.0</Version>
     <ApplicationIcon>Assets\studio.ico</ApplicationIcon>
     <Product>RDR1 Animation Studio</Product>
   </PropertyGroup>

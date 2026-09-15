@@ -108,10 +108,13 @@ overwritten automatically.
 
 The **Scenes** section is a cutscene resource viewer. After a game-folder scan it
 browses the discovered camera/cutscene and mission resources, or opens any exported
-`.semantics.json` report. Camera, actor, AI, prop, audio, animation, and timing
-evidence is grouped into tracks with source-order scrubbing and playback. The viewer
-does not turn byte offsets into invented game seconds: labels marked as lexical
-candidates remain evidence until the binary event/camera payload is decoded.
+`.semantics.json` report. Selecting a resource extracts only that item and runs the
+same full semantic decoder used by focused mission reports (including supported
+RSC/Zstandard expansion, bounded VM traces, RBF labels, and XML attributes). Camera,
+actor, AI, prop, audio, animation, and timing evidence is grouped into tracks with
+source-order scrubbing and playback. The viewer does not turn byte offsets into
+invented game seconds: labels marked as lexical candidates remain evidence until
+the binary event/camera payload is independently validated.
 
 The lower scene controls can open any exported `.blend` in Blender's camera view and
 start its timeline automatically. **Render scene to MP4…** runs Blender in headless

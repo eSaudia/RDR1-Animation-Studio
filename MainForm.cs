@@ -43,7 +43,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer previewTimer = new() { Interval = 450 };
     private CancellationTokenSource? previewOperation;
     private int previewVersion;
-    private readonly ListBox sceneResourceList = new() { Dock = DockStyle.Fill, IntegralHeight = false, HorizontalScrollbar = true };
+    private readonly ListBox sceneResourceList = new() { Dock = DockStyle.Fill, IntegralHeight = false, HorizontalScrollbar = true, FormattingEnabled = true };
     private readonly TextBox sceneSearch = new() { Width = 300, PlaceholderText = "Search mission or camera resources…" };
     private readonly ComboBox sceneFilter = new() { Width = 150, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly Label sceneDetails = new() { Dock = DockStyle.Top, AutoSize = false, Height = 122, Padding = new Padding(10), TextAlign = ContentAlignment.TopLeft };
@@ -219,7 +219,7 @@ internal sealed class MainForm : Form
         title.Text = page == "Library" ? "Animation library" : page;
         libraryPage.Visible = page == "Library"; scenePage.Visible = page == "Scenes"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !scenePage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
-        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.15 · Cutscene resource viewer\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nMission reports now include bounded VM traces, candidate resource records, and a stable record index; unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
+        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.16 · Scene resource decoding\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nScene selections now use the full semantic decoder when available, exposing bounded VM traces, RBF labels, XML attributes, and conservative track candidates; unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") {
             string inventory = gameLibrary is null ? "No game folder scanned yet." :
                 $"Mission resource inventory (identified, not decoded):\n" +
@@ -766,7 +766,7 @@ internal sealed class MainForm : Form
         sceneTimeline.Paint += (_, e) => PaintSceneTimeline(e.Graphics, sceneTimeline.ClientSize);
         sceneScrubber.ValueChanged += (_, _) => { sceneCursor = sceneScrubber.Value; UpdateSceneClock(); sceneTimeline.Invalidate(); };
         sceneSearch.TextChanged += (_, _) => RefreshSceneResources(); sceneFilter.SelectedIndexChanged += (_, _) => RefreshSceneResources();
-        sceneResourceList.Format += (_, e) => { if (e.ListItem is GameAsset asset) e.Value = $"{asset.Name}  ·  {Path.GetFileName(asset.ArchivePath)}\n{asset.InternalPath}"; };
+        sceneResourceList.Format += (_, e) => { if (e.ListItem is GameAsset asset) e.Value = $"{asset.Name}  ·  {asset.Kind}"; };
         sceneResourceList.SelectedIndexChanged += async (_, _) => await LoadSelectedSceneResourceAsync();
         scenePlaybackTimer.Tick += (_, _) => AdvanceScenePlayback();
         scenePage.Controls.Add(split); scenePage.Controls.Add(footer); scenePage.Controls.Add(browserBar); scenePage.Controls.Add(heading);
@@ -808,15 +808,48 @@ internal sealed class MainForm : Form
         using var cancellation = new CancellationTokenSource(); sceneLoadOperation = cancellation;
         try
         {
-            sceneDetails.Text = "Reading " + asset.Name + "…\n\nExtracting one resource; no other mission data is scanned.";
+            sceneDetails.Text = "Reading " + asset.Name + "…\n\nExtracting one resource and decoding its verified semantics; no other mission data is scanned.";
             byte[] bytes = await Task.Run(() => GameLibrary.Extract(asset, archiveNames), cancellation.Token);
-            string json = await Task.Run(() => ResourceSemantics.DecodeToJson(bytes, asset.InternalPath), cancellation.Token);
+            string json = await DecodeSceneResourceAsync(bytes, asset.InternalPath, cancellation.Token);
             using JsonDocument report = JsonDocument.Parse(json);
             ApplyCutsceneReport(report.RootElement, asset.Name, asset.ArchivePath + "\\" + asset.InternalPath);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { sceneDetails.Text = "Could not read " + asset.Name + ".\n\n" + ex.Message; sceneMarkers = []; sceneCursor = 0; sceneScrubber.Maximum = 1; sceneScrubber.Value = 0; UpdateSceneClock(); sceneTimeline.Invalidate(); }
         finally { if (ReferenceEquals(sceneLoadOperation, cancellation)) sceneLoadOperation = null; }
+    }
+    private async Task<string> DecodeSceneResourceAsync(byte[] bytes, string source, CancellationToken token)
+    {
+        // Use the same full semantic engine as the focused mission decoder for
+        // scene resources.  It expands supported RSC/Zstandard payloads and
+        // exposes bounded VM traces, RBF labels, and XML attributes.  The
+        // native reader remains a truthful fallback when Python is unavailable.
+        string? python = await Task.Run(FindWorkingPython, token);
+        string semanticScript = Path.Combine(ToolPath, "resource_semantics.py");
+        if (python is not null && File.Exists(semanticScript))
+        {
+            string tempRoot = Path.Combine(Path.GetTempPath(), "RDR1AnimationStudio-scene-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempRoot);
+            try
+            {
+                string resource = Path.Combine(tempRoot, "resource.bin");
+                string report = Path.Combine(tempRoot, "resource.semantics.json");
+                await File.WriteAllBytesAsync(resource, bytes, token);
+                var args = new List<string> { semanticScript, resource, "--output", report };
+                string? nativeDb = FindNativeDatabase();
+                if (nativeDb is not null) { args.Add("--native-db"); args.Add(nativeDb); }
+                await Execute(python, args.ToArray(), token, true);
+                if (File.Exists(report)) return await File.ReadAllTextAsync(report, token);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                // Keep selection useful on systems without the optional Python
+                // dependency or for a resource the helper cannot expand.
+            }
+            finally { try { Directory.Delete(tempRoot, true); } catch { } }
+        }
+        return await Task.Run(() => ResourceSemantics.DecodeToJson(bytes, source), token);
     }
     private async Task OpenCutsceneReportAsync()
     {
