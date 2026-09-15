@@ -49,6 +49,7 @@ internal sealed class MainForm : Form
     private static readonly object pythonProbeLock = new();
     private static bool pythonProbeComplete;
     private static string? pythonPath;
+    private static readonly Dictionary<string, bool> pythonDependencyFallback = new(StringComparer.OrdinalIgnoreCase);
     private static string ToolPath => Path.Combine(AppContext.BaseDirectory, "Tools", "WasInspector");
     internal sealed record SourceFile(string File, string Label);
     private sealed record ArchiveStamp(string Path, long Length, long LastWriteUtcTicks);
@@ -1117,16 +1118,55 @@ internal sealed class MainForm : Form
         using var d = new OpenFileDialog { Title = "Locate Blender", Filter = "Blender|blender.exe" }; return d.ShowDialog(this) == DialogResult.OK ? blender = d.FileName : null;
     }
     private static string Job() { string p = Path.Combine(Path.GetTempPath(), "RDR1AnimationStudio", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(p); return p; }
-    private Task Python(string script, string[] args, CancellationToken token) => Execute(FindWorkingPython() ?? throw new FileNotFoundException("Python 3.12 is required by the animation engine."), new[] { Path.Combine(ToolPath, script) }.Concat(args).ToArray(), token, true);
+    private Task Python(string script, string[] args, CancellationToken token) => Execute(FindWorkingPython() ?? throw new FileNotFoundException("Python 3.12 or Blender's embedded Python is required by the animation engine."), new[] { Path.Combine(ToolPath, script) }.Concat(args).ToArray(), token, true);
     private async Task Execute(string exe, string[] args, CancellationToken token, bool python = false) {
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }; foreach (string arg in args) start.ArgumentList.Add(arg);
-        if (python) start.Environment["PYTHONPATH"] = Path.Combine(ToolPath, "_deps");
+        if (python)
+        {
+            string dependencies = Path.Combine(ToolPath, "_deps");
+            if (Directory.Exists(dependencies) && NeedsBundledPythonDependencies(exe))
+                start.Environment["PYTHONPATH"] = dependencies;
+            else
+                // Do not let a Python 3.12-only bundled extension shadow a
+                // compatible package shipped by Blender's embedded runtime.
+                start.Environment.Remove("PYTHONPATH");
+        }
         using var p = Process.Start(start) ?? throw new InvalidOperationException("Could not start animation engine");
         using var registration = token.Register(() => { try { p.Kill(true); } catch { } });
         var errors = p.StandardError.ReadToEndAsync(); var output = new System.Text.StringBuilder();
         while (await p.StandardOutput.ReadLineAsync(token) is { } line) { output.AppendLine(line); status.Text = line.Length > 180 ? line[..180] : line; }
         await p.WaitForExitAsync(token); string error = await errors;
         if (p.ExitCode != 0) throw new InvalidOperationException(SummarizeProcessFailure(error, output.ToString()));
+    }
+    private static bool NeedsBundledPythonDependencies(string executable)
+    {
+        lock (pythonProbeLock)
+        {
+            if (pythonDependencyFallback.TryGetValue(executable, out bool cached)) return cached;
+            bool needs = true;
+            try
+            {
+                // Probe the interpreter without our optional dependency path.
+                // Blender 5.2 includes a Python 3.13-compatible zstandard;
+                // older/system Python runtimes use the bundled 3.12 wheel.
+                var probe = new ProcessStartInfo(executable)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                probe.ArgumentList.Add("-c");
+                probe.ArgumentList.Add("import zstandard");
+                probe.Environment.Remove("PYTHONPATH");
+                using var process = Process.Start(probe);
+                needs = process is null || !process.WaitForExit(3000) || process.ExitCode != 0;
+                if (process is not null && !process.HasExited) process.Kill(true);
+            }
+            catch { needs = true; }
+            pythonDependencyFallback[executable] = needs;
+            return needs;
+        }
     }
     private static string SummarizeProcessFailure(string error, string output)
     {

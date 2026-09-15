@@ -61,10 +61,35 @@ def decode_rsc5_flags(flag: int) -> dict[str, Any]:
 def decompress_zstd(payload: bytes) -> bytes:
     try:
         import zstandard
-    except ImportError as exc:
-        raise InspectionError(
-            "The 'zstandard' Python package is required to inspect compressed RSC5 files."
-        ) from exc
+    except ImportError:
+        # The studio ships a small Python 3.12 dependency beside the
+        # inspectors, while Blender 5.2 embeds Python 3.13.  If PYTHONPATH
+        # exposes the bundled extension first, its ABI may not match the
+        # interpreter even though Blender has its own compatible package.
+        optional_roots = [
+            entry for entry in sys.path
+            if pathlib.Path(entry).name.casefold() == "_deps"
+        ]
+        for entry in optional_roots:
+            while entry in sys.path:
+                sys.path.remove(entry)
+        # A failed package import can leave a partially initialized module in
+        # sys.modules. Clear it before retrying the normal site-packages path.
+        for module_name in list(sys.modules):
+            if module_name == "zstandard" or module_name.startswith("zstandard."):
+                sys.modules.pop(module_name, None)
+        try:
+            import zstandard
+        except ImportError as fallback_error:
+            raise InspectionError(
+                "The 'zstandard' Python package is required to inspect compressed RSC5 files "
+                "(the bundled extension is incompatible with this Python runtime)."
+            ) from fallback_error
+        finally:
+            # Keep the optional dependency available for later imports without
+            # changing the module that was successfully loaded above.
+            for entry in reversed(optional_roots):
+                sys.path.insert(0, entry)
 
     try:
         import io

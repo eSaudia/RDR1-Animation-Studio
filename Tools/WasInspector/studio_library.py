@@ -123,9 +123,17 @@ def export_library(rows, output, blender, skeleton_path, base_blend=None):
         except (ValueError, RuntimeError, OSError) as exc:
             report['failed'].append({'source': source, 'error': str(exc)})
         print(f'Exported {len(report["exported"])} Blender files', flush=True)
-    (output / 'export-report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+    report_path = output / 'export-report.json'
+    report_path.write_text(json.dumps(report, indent=2), encoding='utf-8')
     if not report['exported']:
-        raise ValueError('No clips exported. Read export-report.json for details.')
+        # Keep the report as the complete machine-readable diagnostic, but
+        # include the first concrete reason in the process error as well.  The
+        # desktop UI can then explain a failed preview/export immediately
+        # instead of leaving the user with a generic "No clips exported".
+        failures = report.get('failed', [])
+        first = failures[0] if failures else {}
+        detail = str(first.get('error', 'No supported clips were produced.'))
+        raise ValueError(f"No clips exported. Report: {report_path}. First failure: {detail}")
 
 
 def main():
