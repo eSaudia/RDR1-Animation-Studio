@@ -106,12 +106,19 @@ overwritten automatically.
 
 ## Scene playback and rendering
 
-The **Scenes** section can open any exported `.blend` in Blender's camera view and
+The **Scenes** section is a cutscene resource viewer. After a game-folder scan it
+browses the discovered camera/cutscene and mission resources, or opens any exported
+`.semantics.json` report. Camera, actor, AI, prop, audio, animation, and timing
+evidence is grouped into tracks with source-order scrubbing and playback. The viewer
+does not turn byte offsets into invented game seconds: labels marked as lexical
+candidates remain evidence until the binary event/camera payload is decoded.
+
+The lower scene controls can open any exported `.blend` in Blender's camera view and
 start its timeline automatically. **Render scene to MP4…** runs Blender in headless
 mode at the scene's own frame range and FPS, writing an H.264 movie without changing
 the source `.blend`. The current intro scene remains a procedural sample: its actor
-motion and shot markers are real Blender data, while mission cameras, props, AI
-tasks, and audio are still future decoded inputs.
+motion and shot markers are real Blender data, while mission cameras, props, AI tasks,
+and audio are still future decoded inputs.
 
 ### Faster repeat scans
 
