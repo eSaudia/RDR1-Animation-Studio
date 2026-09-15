@@ -43,6 +43,20 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer previewTimer = new() { Interval = 450 };
     private CancellationTokenSource? previewOperation;
     private int previewVersion;
+    private readonly ListBox sceneResourceList = new() { Dock = DockStyle.Fill, IntegralHeight = false, HorizontalScrollbar = true };
+    private readonly TextBox sceneSearch = new() { Width = 300, PlaceholderText = "Search mission or camera resources…" };
+    private readonly ComboBox sceneFilter = new() { Width = 150, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly Label sceneDetails = new() { Dock = DockStyle.Top, AutoSize = false, Height = 122, Padding = new Padding(10), TextAlign = ContentAlignment.TopLeft };
+    private readonly Panel sceneTimeline = new() { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle };
+    private readonly TrackBar sceneScrubber = new() { Minimum = 0, Maximum = 1, TickStyle = TickStyle.None, AutoSize = false, Height = 28 };
+    private readonly Label sceneClock = new() { AutoSize = true, Padding = new Padding(6, 7, 8, 0), Text = "Evidence 0 / 0" };
+    private readonly Button scenePlay = new() { Text = "▶ Play evidence", Width = 140, Height = 34, FlatStyle = FlatStyle.Flat };
+    private readonly System.Windows.Forms.Timer scenePlaybackTimer = new() { Interval = 80 };
+    private CancellationTokenSource? sceneLoadOperation;
+    private IReadOnlyList<GameAsset> sceneResources = [];
+    private List<CutsceneMarker> sceneMarkers = [];
+    private int sceneCursor;
+    private bool scenePlaying;
     // Python discovery used to recursively scan every runtime directory on
     // every operation.  Keep the result for this process so a second decode
     // starts immediately, and probe it off the UI thread where needed.
@@ -65,6 +79,7 @@ internal sealed class MainForm : Form
     private sealed record CharacterChoice(string Label, GameAsset? Asset) {
         public override string ToString() => Label;
     }
+    private sealed record CutsceneMarker(string Track, string Label, int Sequence, int Offset, string Confidence);
     private sealed record Catalog(List<Clip> Clips, List<JsonElement> Errors);
 
     public MainForm()
@@ -126,7 +141,7 @@ internal sealed class MainForm : Form
             _ = CloseWhenIdleAsync();
         };
         Theme();
-        FormClosed += (_, _) => { previewTimer.Stop(); previewTimer.Dispose(); previewOperation?.Cancel(); };
+        FormClosed += (_, _) => { previewTimer.Stop(); previewTimer.Dispose(); scenePlaybackTimer.Stop(); scenePlaybackTimer.Dispose(); previewOperation?.Cancel(); sceneLoadOperation?.Cancel(); };
     }
     private async Task CloseWhenIdleAsync()
     {
@@ -717,46 +732,209 @@ internal sealed class MainForm : Form
     }
     private void BuildScenePage()
     {
-        var heading = new Label { Dock = DockStyle.Top, Height = 108, Padding = new Padding(0, 4, 0, 0),
-            Text = "SCENE PLAYBACK & RENDER\n\nIntro sequence sample · 00:24 · 30 FPS\nExported scenes can be opened in Blender's camera view, played automatically, or rendered to an MP4. Mission scripts, cameras, props and AI are not decoded yet." ,
+        var heading = new Label { Dock = DockStyle.Top, Height = 84, Padding = new Padding(0, 4, 0, 0),
+            Text = "CUTSCENE VIEWER\n\nBrowse discovered mission/camera resources or open a semantic report. The viewer preserves source order and confidence instead of inventing camera timing.",
             Font = new Font("Segoe UI", 13) };
-        var timeline = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0), BorderStyle = BorderStyle.FixedSingle };
-        timeline.Paint += (_, e) =>
-        {
-            e.Graphics.Clear(dark ? Color.FromArgb(23, 29, 38) : Color.White);
-            Color gridLine = dark ? Color.FromArgb(52, 63, 78) : Color.FromArgb(215, 222, 232);
-            Color textColor = dark ? Color.FromArgb(220, 228, 238) : Color.FromArgb(35, 42, 52);
-            using var pen = new Pen(gridLine); using var brush = new SolidBrush(textColor);
-            int left = 170, top = 48, row = 58, width = Math.Max(1, timeline.ClientSize.Width - left - 20);
-            for (int second = 0; second <= 24; second += 2)
-            {
-                int x = left + (int)(width * second / 24.0); e.Graphics.DrawLine(pen, x, top - 22, x, top + row * 4);
-                e.Graphics.DrawString($"{second:00}s", Font, brush, x - 10, 10);
-            }
-            string[] tracks = ["Camera", "John · actor", "Deputy · actor", "Environment"];
-            foreach (int i in Enumerable.Range(0, tracks.Length))
-            {
-                int y = top + i * row; e.Graphics.DrawString(tracks[i], Font, brush, 12, y + 16); e.Graphics.DrawLine(pen, left, y + row - 1, left + width, y + row - 1);
-            }
-            void Clip(int track, double start, double end, string label, Color color)
-            {
-                int x = left + (int)(width * start / 24.0), y = top + track * row + 9;
-                int w = Math.Max(18, (int)(width * (end - start) / 24.0));
-                using var fill = new SolidBrush(color); e.Graphics.FillRectangle(fill, x, y, w, 38); e.Graphics.DrawString(label, Font, Brushes.White, x + 7, y + 10);
-            }
-            Clip(0, 0, 4, "Establishing shot", Color.FromArgb(83, 126, 164)); Clip(0, 4, 9, "Push-in", Color.FromArgb(83, 126, 164)); Clip(0, 9, 15, "Cutaway", Color.FromArgb(83, 126, 164)); Clip(0, 15, 24, "Wide exit", Color.FromArgb(83, 126, 164));
-            Clip(1, 2, 13, "Walk · gent_wag_psg", Color.FromArgb(40, 143, 126)); Clip(1, 13, 20, "Look around", Color.FromArgb(40, 143, 126));
-            Clip(2, 7, 16, "React · idle", Color.FromArgb(159, 104, 59)); Clip(2, 16, 24, "Gesture", Color.FromArgb(159, 104, 59));
-            Clip(3, 0, 24, "Blackwater street / lighting", Color.FromArgb(102, 91, 135));
-        };
+        sceneFilter.Items.Clear(); sceneFilter.Items.AddRange(["All resources", "Cameras / cutscenes", "Mission scripts"]); sceneFilter.SelectedIndex = 0;
+        var browserBar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48, WrapContents = false, Padding = new Padding(0, 4, 0, 0) };
+        browserBar.Controls.Add(new Label { Text = "Resource", AutoSize = true, Padding = new Padding(0, 7, 5, 0) }); browserBar.Controls.Add(sceneSearch);
+        browserBar.Controls.Add(new Label { Text = "Type", AutoSize = true, Padding = new Padding(14, 7, 5, 0) }); browserBar.Controls.Add(sceneFilter);
+        var openReport = Button("▤ Open semantic report…", async (_, _) => await OpenCutsceneReportAsync()); openReport.Width = 190; browserBar.Controls.Add(openReport);
+        var refresh = Button("↻ Refresh", (_, _) => RefreshSceneResources()); refresh.Width = 110; browserBar.Controls.Add(refresh);
+        var left = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 8, 10, 0) };
+        left.Controls.Add(sceneResourceList);
+        var leftCaption = new Label { Dock = DockStyle.Top, Height = 30, Text = "Discovered resources", Padding = new Padding(4, 5, 0, 0) }; left.Controls.Add(leftCaption);
+        var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 8, 0, 0) };
+        right.Controls.Add(sceneTimeline); right.Controls.Add(sceneDetails);
+        sceneScrubber.Width = 380;
+        var playback = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48, WrapContents = false, Padding = new Padding(0, 6, 0, 0) };
+        scenePlay.FlatAppearance.BorderSize = 0; scenePlay.Click += (_, _) => ToggleScenePlayback(); playback.Controls.Add(scenePlay); playback.Controls.Add(sceneScrubber); playback.Controls.Add(sceneClock);
+        right.Controls.Add(playback);
+        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 350, Panel1MinSize = 240, Panel2MinSize = 420 };
+        split.Panel1.Controls.Add(left); split.Panel2.Controls.Add(right);
         var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 112, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
         var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
         var play = Button("▶ Play a Blender scene…", async (_, _) => await PlaySceneAsync()); play.Width = 220;
         var render = Button("● Render scene to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 220;
         footer.Controls.Add(export);
         footer.Controls.Add(play); footer.Controls.Add(render);
-        footer.Controls.Add(new Label { Text = "Export creates a .blend with visible actor collections, a moving authored walk action, camera markers and timeline events.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
-        scenePage.Controls.Add(timeline); scenePage.Controls.Add(footer); scenePage.Controls.Add(heading);
+        footer.Controls.Add(new Label { Text = "The lower controls still open or render a Blender scene. Resource tracks above are evidence-only until camera/event payloads are decoded.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
+        sceneTimeline.Paint += (_, e) => PaintSceneTimeline(e.Graphics, sceneTimeline.ClientSize);
+        sceneScrubber.ValueChanged += (_, _) => { sceneCursor = sceneScrubber.Value; UpdateSceneClock(); sceneTimeline.Invalidate(); };
+        sceneSearch.TextChanged += (_, _) => RefreshSceneResources(); sceneFilter.SelectedIndexChanged += (_, _) => RefreshSceneResources();
+        sceneResourceList.Format += (_, e) => { if (e.ListItem is GameAsset asset) e.Value = $"{asset.Name}  ·  {Path.GetFileName(asset.ArchivePath)}\n{asset.InternalPath}"; };
+        sceneResourceList.SelectedIndexChanged += async (_, _) => await LoadSelectedSceneResourceAsync();
+        scenePlaybackTimer.Tick += (_, _) => AdvanceScenePlayback();
+        scenePage.Controls.Add(split); scenePage.Controls.Add(footer); scenePage.Controls.Add(browserBar); scenePage.Controls.Add(heading);
+        sceneDetails.Text = "Choose a game folder in Library to populate mission and camera resources.\n\nYou can also open an existing *.semantics.json report directly.";
+    }
+    private void RefreshSceneResources()
+    {
+        var all = (gameLibrary?.Cameras ?? []).Concat(gameLibrary?.MissionScripts ?? [])
+            .DistinctBy(asset => asset.ArchivePath + "|" + asset.EntryIndex)
+            .ToList();
+        string query = sceneSearch.Text.Trim();
+        string filter = sceneFilter.SelectedItem as string ?? "All resources";
+        IEnumerable<GameAsset> visible = all.Where(asset =>
+            (query.Length == 0 || asset.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || asset.InternalPath.Contains(query, StringComparison.OrdinalIgnoreCase) || asset.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)) &&
+            (filter == "All resources" || (filter == "Cameras / cutscenes" && asset.Kind == GameAssetKind.Camera) || (filter == "Mission scripts" && asset.Kind == GameAssetKind.MissionScript)));
+        sceneResources = visible.OrderBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase).ThenBy(asset => asset.InternalPath, StringComparer.OrdinalIgnoreCase).ToArray();
+        sceneResourceList.BeginUpdate();
+        try
+        {
+            sceneResourceList.Items.Clear();
+            sceneResourceList.Items.AddRange(sceneResources.Cast<object>().ToArray());
+            if (sceneResourceList.Items.Count > 0) sceneResourceList.SelectedIndex = 0;
+            else
+            {
+                sceneMarkers = [];
+                sceneCursor = 0;
+                sceneScrubber.Maximum = 1; sceneScrubber.Value = 0; UpdateSceneClock(); sceneTimeline.Invalidate();
+                sceneDetails.Text = gameLibrary is null
+                    ? "Choose a game folder in Library to populate mission and camera resources.\n\nYou can also open an existing *.semantics.json report directly."
+                    : "No mission or camera resource matches this filter.\n\nTry All resources or open a semantic report directly.";
+            }
+        }
+        finally { sceneResourceList.EndUpdate(); }
+    }
+    private async Task LoadSelectedSceneResourceAsync()
+    {
+        if (sceneResourceList.SelectedItem is not GameAsset asset) return;
+        sceneLoadOperation?.Cancel();
+        using var cancellation = new CancellationTokenSource(); sceneLoadOperation = cancellation;
+        try
+        {
+            sceneDetails.Text = "Reading " + asset.Name + "…\n\nExtracting one resource; no other mission data is scanned.";
+            byte[] bytes = await Task.Run(() => GameLibrary.Extract(asset, archiveNames), cancellation.Token);
+            string json = await Task.Run(() => ResourceSemantics.DecodeToJson(bytes, asset.InternalPath), cancellation.Token);
+            using JsonDocument report = JsonDocument.Parse(json);
+            ApplyCutsceneReport(report.RootElement, asset.Name, asset.ArchivePath + "\\" + asset.InternalPath);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { sceneDetails.Text = "Could not read " + asset.Name + ".\n\n" + ex.Message; sceneMarkers = []; sceneCursor = 0; sceneScrubber.Maximum = 1; sceneScrubber.Value = 0; UpdateSceneClock(); sceneTimeline.Invalidate(); }
+        finally { if (ReferenceEquals(sceneLoadOperation, cancellation)) sceneLoadOperation = null; }
+    }
+    private async Task OpenCutsceneReportAsync()
+    {
+        using var open = new OpenFileDialog { Title = "Open cutscene semantic report", Filter = "Semantic JSON|*.semantics.json;*.mission.semantics.json;*.json|All files|*.*", CheckFileExists = true };
+        if (open.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            if (new FileInfo(open.FileName).Length > 128L * 1024 * 1024)
+                throw new InvalidDataException("This report is too large for the interactive viewer. Open it in Scan report → JSON viewer instead.");
+            sceneDetails.Text = "Loading semantic report…";
+            using JsonDocument report = await Task.Run(() => JsonDocument.Parse(File.ReadAllText(open.FileName)), CancellationToken.None);
+            ApplyCutsceneReport(report.RootElement, Path.GetFileName(open.FileName), open.FileName);
+        }
+        catch (Exception ex) { sceneDetails.Text = "Could not open semantic report.\n\n" + ex.Message; }
+    }
+    private void ApplyCutsceneReport(JsonElement root, string name, string source)
+    {
+        var markers = new List<CutsceneMarker>();
+        JsonElement trace = default;
+        if (root.TryGetProperty("missionTrace", out JsonElement directTrace)) trace = directTrace;
+        else if (root.TryGetProperty("payload", out JsonElement payload) && payload.TryGetProperty("missionTrace", out JsonElement payloadTrace)) trace = payloadTrace;
+        if (trace.ValueKind == JsonValueKind.Object && trace.TryGetProperty("events", out JsonElement events) && events.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in events.EnumerateArray().Take(1000))
+            {
+                string track = TrackFor(item.TryGetProperty("domains", out JsonElement domains) ? domains : default, item.TryGetProperty("kind", out JsonElement kind) ? kind.GetString() : null);
+                string label = FirstString(item, "nativeName", "opcode", "functionLabel", "kind") ?? "event";
+                int sequence = IntValue(item, "sequence") ?? markers.Count;
+                int offset = IntValue(item, "offset") ?? 0;
+                markers.Add(new CutsceneMarker(track, label, sequence, offset, "validated VM trace"));
+            }
+        }
+        if (markers.Count == 0 && root.TryGetProperty("typedRecordCandidates", out JsonElement candidates) && candidates.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in candidates.EnumerateArray().Take(1000))
+            {
+                string track = TrackFor(item.TryGetProperty("domains", out JsonElement domains) ? domains : default, item.TryGetProperty("recordType", out JsonElement type) ? type.GetString() : null);
+                string label = FirstString(item, "value", "recordType") ?? "record";
+                int sequence = markers.Count;
+                int offset = IntValue(item, "sourceOffset") ?? 0;
+                markers.Add(new CutsceneMarker(track, label, sequence, offset, "lexical candidate"));
+            }
+        }
+        sceneMarkers = markers.OrderBy(marker => marker.Sequence).ThenBy(marker => marker.Offset).ToList();
+        sceneCursor = 0;
+        sceneScrubber.Maximum = Math.Max(1, sceneMarkers.Count - 1); sceneScrubber.Value = 0;
+        string format = FirstString(root, "format", "class") ?? "unknown resource";
+        string confidence = FirstString(root, "confidence") ?? "evidence report";
+        string timing = sceneMarkers.Any(marker => marker.Confidence == "validated VM trace") ? "VM source-order events" : "source-order candidates (timing unresolved)";
+        sceneDetails.Text = $"{name}\n{format} · {sceneMarkers.Count:N0} track events · {timing}\n{source}\n\nConfidence: {confidence}\nSelect an event or press Play evidence. This viewer never converts byte offsets into fake game seconds.";
+        UpdateSceneClock(); sceneTimeline.Invalidate();
+    }
+    private static string TrackFor(JsonElement domains, string? fallback)
+    {
+        if (domains.ValueKind == JsonValueKind.Array)
+            foreach (JsonElement domain in domains.EnumerateArray())
+                if (domain.ValueKind == JsonValueKind.String && domain.GetString() is string value && value.Length > 0) return value switch
+                {
+                    "camera" => "Camera", "actor" => "Actor", "ai" => "AI", "prop" => "Prop", "audio" => "Audio", "animation" => "Animation", "timing" => "Timing", _ => "Other"
+                };
+        string text = fallback?.ToLowerInvariant() ?? "";
+        if (text.Contains("camera") || text.Contains("cut")) return "Camera";
+        if (text.Contains("audio") || text.Contains("sound")) return "Audio";
+        if (text.Contains("anim")) return "Animation";
+        if (text.Contains("ai") || text.Contains("brain")) return "AI";
+        return "Other";
+    }
+    private static string? FirstString(JsonElement item, params string[] properties)
+    {
+        foreach (string property in properties)
+            if (item.TryGetProperty(property, out JsonElement value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())) return value.GetString();
+        return null;
+    }
+    private static int? IntValue(JsonElement item, string property)
+    {
+        if (!item.TryGetProperty(property, out JsonElement value)) return null;
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int result) ? result : null;
+    }
+    private void ToggleScenePlayback()
+    {
+        if (sceneMarkers.Count == 0) return;
+        scenePlaying = !scenePlaying;
+        if (scenePlaying) scenePlaybackTimer.Start(); else scenePlaybackTimer.Stop();
+        scenePlay.Text = scenePlaying ? "❚❚ Pause evidence" : "▶ Play evidence";
+    }
+    private void AdvanceScenePlayback()
+    {
+        if (!scenePlaying || sceneMarkers.Count == 0) return;
+        sceneCursor = sceneCursor >= sceneMarkers.Count - 1 ? 0 : sceneCursor + 1;
+        sceneScrubber.Value = Math.Min(sceneScrubber.Maximum, sceneCursor); UpdateSceneClock(); sceneTimeline.Invalidate();
+    }
+    private void UpdateSceneClock()
+    {
+        sceneClock.Text = sceneMarkers.Count == 0 ? "Evidence 0 / 0" : $"Evidence {sceneCursor + 1:N0} / {sceneMarkers.Count:N0} · {sceneMarkers[sceneCursor].Track}: {sceneMarkers[sceneCursor].Label}";
+    }
+    private void PaintSceneTimeline(Graphics graphics, Size size)
+    {
+        graphics.Clear(dark ? Color.FromArgb(23, 29, 38) : Color.White);
+        Color gridLine = dark ? Color.FromArgb(52, 63, 78) : Color.FromArgb(215, 222, 232);
+        Color textColor = dark ? Color.FromArgb(220, 228, 238) : Color.FromArgb(35, 42, 52);
+        using var pen = new Pen(gridLine); using var brush = new SolidBrush(textColor);
+        string[] tracks = ["Camera", "Actor", "AI", "Prop", "Audio", "Animation", "Timing", "Other"];
+        int left = 112, top = 48, row = Math.Max(34, (size.Height - top - 12) / tracks.Length), width = Math.Max(1, size.Width - left - 14);
+        graphics.DrawString("SOURCE-ORDER EVENT INDEX · NOT GAME SECONDS", Font, brush, 10, 10);
+        for (int i = 0; i < tracks.Length; i++)
+        {
+            int y = top + i * row; graphics.DrawString(tracks[i], Font, brush, 10, y + 9); graphics.DrawLine(pen, left, y + row - 1, left + width, y + row - 1);
+        }
+        int count = Math.Max(1, sceneMarkers.Count - 1);
+        foreach (var (marker, index) in sceneMarkers.Select((item, index) => (item, index)))
+        {
+            int track = Array.IndexOf(tracks, marker.Track); if (track < 0) track = tracks.Length - 1;
+            int x = left + (int)(width * index / (double)count), y = top + track * row + 5;
+            int w = sceneMarkers.Count < 80 ? Math.Max(26, width / Math.Max(1, sceneMarkers.Count)) : 8;
+            Color fillColor = marker.Track switch { "Camera" => Color.FromArgb(83, 126, 164), "Actor" => Color.FromArgb(40, 143, 126), "AI" => Color.FromArgb(159, 104, 59), "Prop" => Color.FromArgb(128, 104, 160), "Audio" => Color.FromArgb(159, 81, 119), "Animation" => Color.FromArgb(42, 139, 169), "Timing" => Color.FromArgb(133, 133, 74), _ => Color.FromArgb(92, 104, 117) };
+            using var fill = new SolidBrush(fillColor); graphics.FillRectangle(fill, x, y, w, Math.Max(18, row - 10));
+            if (sceneMarkers.Count < 80) graphics.DrawString(marker.Label.Length > 22 ? marker.Label[..22] + "…" : marker.Label, Font, Brushes.White, x + 4, y + 6);
+        }
+        if (sceneMarkers.Count > 0)
+        {
+            int cursorX = left + (int)(width * sceneCursor / (double)count); using var cursorPen = new Pen(Color.Gold, 2); graphics.DrawLine(cursorPen, cursorX, top - 4, cursorX, top + row * tracks.Length);
+        }
     }
     private async Task ExportSceneSampleAsync()
     {
@@ -917,6 +1095,7 @@ internal sealed class MainForm : Form
             }
             await IndexAsync(input, token); problems.AddRange(errors);
             SetCharacters(game.Characters);
+            RefreshSceneResources();
             status.Text = $"Collection complete · {input.Count:N0} animation sets · mission inventory: {game.MissionScripts.Count:N0} scripts, {game.Cameras.Count:N0} cameras, {game.Props.Count:N0} props, {game.AiData.Count:N0} AI, {game.Audio.Count:N0} audio.";
         });
     }
