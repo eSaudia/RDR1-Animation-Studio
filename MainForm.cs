@@ -761,10 +761,10 @@ internal sealed class MainForm : Form
         var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 112, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
         var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
         var play = Button("▶ Play a Blender scene…", async (_, _) => await PlaySceneAsync()); play.Width = 220;
-        var render = Button("● Render current scene to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 250;
+        var render = Button("● Render selected/current to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 270;
         footer.Controls.Add(export);
         footer.Controls.Add(play); footer.Controls.Add(render);
-        footer.Controls.Add(new Label { Text = "The lower controls still open or render a Blender scene. Resource tracks above are evidence-only until camera/event payloads are decoded.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
+        footer.Controls.Add(new Label { Text = "Select one supported animation in Library to render its exact motion; otherwise the last opened Blender scene is used. Resource tracks remain evidence-only until camera/event payloads are decoded.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
         sceneTimeline.Paint += (_, e) => PaintSceneTimeline(e.Graphics, sceneTimeline.ClientSize);
         sceneScrubber.ValueChanged += (_, _) => { sceneCursor = sceneScrubber.Value; UpdateSceneClock(); sceneTimeline.Invalidate(); };
         sceneSearch.TextChanged += (_, _) => RefreshSceneResources(); sceneFilter.SelectedIndexChanged += (_, _) => RefreshSceneResources();
@@ -1012,10 +1012,17 @@ internal sealed class MainForm : Form
     {
         if (busy) return;
         string? exe = Blender(); if (exe is null) return;
+        Clip? selectedClip = grid.SelectedRows.Count == 1 && grid.SelectedRows[0].DataBoundItem is Clip candidate && candidate.Status == "Supported" ? candidate : null;
+        if (selectedClip is not null)
+        {
+            await RenderSelectedAnimationAsync(exe, selectedClip);
+            return;
+        }
         string? blend = lastSceneBlend;
         if (string.IsNullOrWhiteSpace(blend) || !File.Exists(blend))
         {
-            MessageBox.Show(this, "There is no current Blender scene to render yet.\n\nUse ‘Export sample scene to Blender…’ or ‘Play a Blender scene…’ first. The raw mission resources are not automatically converted into a Blender scene until their camera and event payloads are decoded.", "Render scene", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            DialogResult renderDemo = MessageBox.Show(this, "There is no current Blender scene.\n\nWould you like to render the procedural demo directly to MP4? It is only a preview scene; select one supported animation in Library to render real clip motion.", "Render scene", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (renderDemo == DialogResult.Yes) await RenderDemoDirectAsync(exe);
             return;
         }
         using var save = new SaveFileDialog { Title = "Save rendered scene movie", Filter = "MP4 movie|*.mp4", FileName = Path.GetFileNameWithoutExtension(blend) + ".mp4", AddExtension = true, OverwritePrompt = true };
@@ -1028,6 +1035,55 @@ internal sealed class MainForm : Form
             FileInfo movie = new(save.FileName);
             status.Text = $"Scene render complete · {movie.Length:N0} bytes";
             MessageBox.Show(this, $"Scene rendered successfully.\n\n{movie.FullName}\nSize: {movie.Length:N0} bytes", "Scene render complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        });
+    }
+    private async Task RenderSelectedAnimationAsync(string exe, Clip clip)
+    {
+        using var save = new SaveFileDialog { Title = "Save selected animation movie", Filter = "MP4 movie|*.mp4", FileName = clip.Name + ".mp4", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            string job = Job();
+            try
+            {
+                string request = Path.Combine(job, "selection.json");
+                string exported = Path.Combine(job, "export");
+                string prepared = Path.Combine(job, "clip-scene.blend");
+                await File.WriteAllTextAsync(request, JsonSerializer.Serialize(new[] { clip }), token);
+                status.Text = "Preparing selected animation scene…";
+                await Python("studio_library.py", ["export", request, exported, "--blender", exe, "--skeleton", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.skeleton.csv"), "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend")], token);
+                string reportPath = Path.Combine(exported, "export-report.json");
+                using JsonDocument report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath, token));
+                string sourceBlend = report.RootElement.GetProperty("exported")[0].GetProperty("file").GetString() ?? throw new InvalidDataException("The animation exporter did not report a Blender scene.");
+                await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_clip_scene.py"), "--", "--input", sourceBlend, "--output", prepared], token);
+                status.Text = "Rendering selected animation to MP4…";
+                await Execute(exe, ["--background", prepared, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_render_scene.py"), "--", "--output", save.FileName], token);
+                if (!File.Exists(save.FileName)) throw new IOException("Blender completed without creating the MP4 file.");
+                FileInfo movie = new(save.FileName);
+                status.Text = $"Animation render complete · {clip.Name}";
+                MessageBox.Show(this, $"Animation rendered successfully.\n\nClip: {clip.Name}\nMovie: {movie.FullName}\nSize: {movie.Length:N0} bytes", "Animation render complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally { try { Directory.Delete(job, true); } catch { } }
+        });
+    }
+    private async Task RenderDemoDirectAsync(string exe)
+    {
+        using var save = new SaveFileDialog { Title = "Save demo movie", Filter = "MP4 movie|*.mp4", FileName = "RDR1-scene-demo.mp4", AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            string job = Job();
+            try
+            {
+                string blend = Path.Combine(job, "demo.blend");
+                await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_scene_sample.py"), "--", "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend"), "--output", blend], token);
+                await Execute(exe, ["--background", blend, "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_render_scene.py"), "--", "--output", save.FileName], token);
+                if (!File.Exists(save.FileName)) throw new IOException("Blender completed without creating the MP4 file.");
+                FileInfo movie = new(save.FileName);
+                status.Text = $"Demo render complete · {movie.Length:N0} bytes";
+                MessageBox.Show(this, $"Demo movie rendered successfully.\n\n{movie.FullName}\nSize: {movie.Length:N0} bytes", "Demo render complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally { try { Directory.Delete(job, true); } catch { } }
         });
     }
     private void BuildPackPage()
