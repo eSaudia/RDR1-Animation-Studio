@@ -750,7 +750,11 @@ internal sealed class MainForm : Form
         var playback = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48, WrapContents = false, Padding = new Padding(0, 6, 0, 0) };
         scenePlay.FlatAppearance.BorderSize = 0; scenePlay.Click += (_, _) => ToggleScenePlayback(); playback.Controls.Add(scenePlay); playback.Controls.Add(sceneScrubber); playback.Controls.Add(sceneClock);
         right.Controls.Add(playback);
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 350, Panel1MinSize = 240, Panel2MinSize = 420 };
+        // Give WinForms a design-time width before assigning the divider.  A
+        // SplitContainer starts at width 0 during form construction; setting a
+        // 350px divider against 240px + 420px minimum panels at that point
+        // throws and prevents the whole application from opening.
+        var split = new SplitContainer { Dock = DockStyle.Fill, Size = new Size(1000, 500), Orientation = Orientation.Vertical, Panel1MinSize = 240, Panel2MinSize = 420, SplitterDistance = 350 };
         split.Panel1.Controls.Add(left); split.Panel2.Controls.Add(right);
         var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 112, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
         var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
