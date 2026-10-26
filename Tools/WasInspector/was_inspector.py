@@ -34,6 +34,10 @@ TRACK_KIND_NAMES = {
     1: "quaternion_track",
     5: "root_vector_track",
     6: "root_quaternion_track",
+    # Facial/auxiliary controls used by cinematic and mini-game clips.
+    24: "scalar_track",
+    25: "vector_track",
+    26: "quaternion_track",
 }
 
 
@@ -228,6 +232,26 @@ def scan_padded_pointer_table(data: bytes, offset: int, maximum: int = 256) -> l
     return targets
 
 
+def scan_pointer_array(data: bytes, offset: int, count: int) -> list[int]:
+    """Read a compact RSC5 pointer array used by some multi-segment clips.
+
+    Most animation records use 16-byte slots (one pointer followed by twelve
+    0xCD bytes), but a few records store the sequence pointers contiguously
+    and describe the count in the record header.  The game accepts both
+    layouts; keeping this fallback here lets the offline decoder do the same.
+    """
+    if count <= 0 or count > 256 or offset < 0 or offset + count * 4 > len(data):
+        return []
+    targets: list[int] = []
+    for index in range(count):
+        pointer = struct.unpack_from("<I", data, offset + index * 4)[0]
+        target = pointer & POINTER_MASK
+        if pointer >> 28 != 5 or target >= len(data):
+            return []
+        targets.append(target)
+    return targets
+
+
 def parse_compressed_sequence(data: bytes, offset: int) -> dict[str, Any] | None:
     if offset + 0x18 > len(data):
         return None
@@ -274,7 +298,14 @@ def parse_compressed_sequence(data: bytes, offset: int) -> dict[str, Any] | None
             {
                 "offset": descriptor_offset,
                 "kind": kind,
-                "kind_name": TRACK_KIND_NAMES.get(kind, "unknown"),
+                # Facial/auxiliary animation uses additional track ids.  The
+                # payload shape is authoritative for decoding: one component
+                # is a scalar (blend/face control), three components are a
+                # vector control.  Keep the original numeric id as well.
+                "kind_name": TRACK_KIND_NAMES.get(
+                    kind, "scalar_track" if component_count == 1 else
+                    "unknown_vector_track" if component_count == 3 else "unknown"
+                ),
                 "encoded_type": encoded_type,
                 "type_low_nibble": encoded_type & 0x0F,
                 "bone_id": bone_id,

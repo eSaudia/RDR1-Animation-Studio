@@ -17,9 +17,6 @@
     #help { color:var(--muted); white-space:nowrap; }
     #loading { position:absolute; inset:0; display:grid; place-items:center; font-size:16px; color:var(--muted); pointer-events:none; }
   </style>
-  <script type="importmap">
-    {"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}
-  </script>
   <script>
     function reportError(text) { document.getElementById('loading').textContent=text; window.chrome?.webview?.postMessage(JSON.stringify({type:'error',message:text})); }
     addEventListener('error', e => reportError(e.message));
@@ -40,9 +37,11 @@
     <span id="help">Drag: orbit · Right drag: pan · Wheel: zoom</span>
   </div>
   <script type="module">
-    import * as THREE from 'three';
-    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import * as THREE from './vendor/three/three.module.js';
+    import { OrbitControls } from './vendor/three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from './vendor/three/addons/loaders/GLTFLoader.js';
+    const debug = message => window.chrome?.webview?.postMessage(JSON.stringify({type:'debug',message}));
+    debug('module-start');
 
     const params = new URLSearchParams(location.search);
     const viewport = document.getElementById('viewport');
@@ -66,6 +65,7 @@
     const grid = new THREE.GridHelper(20,40,0x526170,0x29323e); grid.rotation.x=0; scene.add(grid);
 
     let mixer=null,actions=[],active=null,duration=0,playing=true,home=null;
+    let modelLoading=false, modelLoaded=false;
     const clock=new THREE.Clock();
     const timeline=document.getElementById('timeline'), time=document.getElementById('time');
     const clipSelect=document.getElementById('clips');
@@ -90,10 +90,14 @@
     const loader = new GLTFLoader();
     function loadError(error) {
       const detail = error?.message || String(error);
+      debug('load-error: ' + detail);
       document.getElementById('loading').textContent='Could not load 3D model: '+detail;
       chrome.webview?.postMessage(JSON.stringify({type:'error',message:detail}));
     }
     function showModel(gltf) {
+      debug('model-loaded: animations=' + gltf.animations.length);
+      modelLoaded=true;
+      modelLoading=false;
       scene.add(gltf.scene);
       gltf.scene.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
       frameObject(gltf.scene);
@@ -112,17 +116,50 @@
       for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
       return bytes.buffer;
     }
+    function receiveModel(message) {
+      if (message.type !== 'model-data' || modelLoading || modelLoaded) return;
+      modelLoading=true;
+      loader.parse(fromBase64(message.data), '', showModel, error => {
+        modelLoading=false;
+        loadError(error);
+      });
+    }
+    const modelName = params.get('model');
+    const directModelUrl = modelName ? 'https://model.local/' + encodeURIComponent(modelName) : null;
+    let directLoadFailed = false;
+    const fallbackToHostMessage = () => {
+      if (!window.chrome?.webview || modelLoaded || modelLoading) return;
+      chrome.webview.postMessage(JSON.stringify({type:'request-model'}));
+    };
     if (window.chrome?.webview) {
       chrome.webview.addEventListener('message', event => {
         try {
           const message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-          if (message.type === 'model-data') loader.parse(fromBase64(message.data), '', showModel, loadError);
+          if (message.type === 'model-data') receiveModel(message);
           else if (message.type === 'error') loadError(message.message);
         } catch (error) { loadError(error); }
       });
+    }
+    if (directModelUrl) {
+      debug('direct-load: ' + directModelUrl);
+      // The host maps the generated GLB to model.local. Loading it directly is
+      // deterministic and avoids losing the initial WebView2 message during
+      // navigation; the message path remains a fallback for older hosts.
+      loader.load(directModelUrl, showModel, undefined, error => {
+        directLoadFailed = true;
+        loadError(error);
+        fallbackToHostMessage();
+      });
+      // If a WebView2 virtual-host request hangs without producing an error,
+      // fall back to the host transfer path rather than leaving the spinner
+      // indefinitely.
+      setTimeout(fallbackToHostMessage, 5000);
+    } else if (window.chrome?.webview) {
+      debug('message-fallback');
       chrome.webview.postMessage(JSON.stringify({type:'request-model'}));
-    } else {
-      loader.load('https://model.local/' + encodeURIComponent(params.get('model')), showModel, undefined, loadError);
+      // Retry the request once in case the host subscribed after the first
+      // message or a navigation event raced the WebView2 initialization.
+      setTimeout(fallbackToHostMessage, 700);
     }
 
     document.getElementById('play').onclick=()=>{ playing=!playing; if(active) active.paused=!playing; document.getElementById('play').textContent=playing?'Pause':'Play'; };

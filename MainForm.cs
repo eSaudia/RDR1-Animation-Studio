@@ -14,9 +14,10 @@ internal sealed class MainForm : Form
     private readonly Label status = new() { Text = "RDR1 Animation Studio / eSaudia", Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(18, 8, 0, 0) };
     private readonly TextBox search = new() { PlaceholderText = "Search animation names or source sets…", Width = 400 };
     private readonly CheckBox unique = new() { Text = "Hide identical motion", Checked = true, AutoSize = true };
-    private readonly CheckBox supported = new() { Text = "Supported only", AutoSize = true };
-    private readonly ComboBox character = new() { Width = 280, DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly DataGridView grid = new() { Dock = DockStyle.Fill, AutoGenerateColumns = false, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, MultiSelect = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect, BorderStyle = BorderStyle.None, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
+    private readonly CheckBox supported = new() { Text = "Supported only", Checked = true, AutoSize = true };
+    private readonly CheckBox autoCharacter = new() { Text = "Auto-match character", Checked = false, AutoSize = true };
+    private readonly ComboBox character = new() { Width = 280, DropDownStyle = ComboBoxStyle.DropDown };
+    private readonly DataGridView grid = new() { Dock = DockStyle.Fill, AutoGenerateColumns = false, ReadOnly = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, MultiSelect = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect, BorderStyle = BorderStyle.None, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
     private readonly Panel libraryPage = new() { Dock = DockStyle.Fill };
     private readonly Panel packPage = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly Panel scenePage = new() { Dock = DockStyle.Fill, Visible = false };
@@ -31,6 +32,7 @@ internal sealed class MainForm : Form
     private readonly ComboBox packCharacter = new() { Width = 280, DropDownStyle = ComboBoxStyle.DropDownList };
     private string? lastPackFolder;
     private readonly List<Clip> clips = [];
+    private readonly HashSet<string> checkedClips = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<SourceFile> sources = [];
     private readonly List<string> problems = [];
     private readonly List<CharacterChoice> characters = [];
@@ -39,10 +41,14 @@ internal sealed class MainForm : Form
     private bool dark = true, busy, ascending = true, closeRequested;
     private CancellationTokenSource? operation;
     private string? blender;
+    private string? sollumzAddonRoot;
+    private string? sollumzXmlRoot;
     private readonly AnimationPreview preview = new() { Dock = DockStyle.Fill };
-    private readonly System.Windows.Forms.Timer previewTimer = new() { Interval = 450 };
     private CancellationTokenSource? previewOperation;
     private int previewVersion;
+    private bool selectingCharacterAutomatically;
+    private bool filteringCharacters;
+    private bool loadDefaultGameOnStartup;
     private readonly ListBox sceneResourceList = new() { Dock = DockStyle.Fill, IntegralHeight = false, HorizontalScrollbar = true, FormattingEnabled = true };
     private readonly TextBox sceneSearch = new() { Width = 300, PlaceholderText = "Search mission or camera resources…" };
     private readonly ComboBox sceneFilter = new() { Width = 150, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -54,6 +60,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer scenePlaybackTimer = new() { Interval = 80 };
     private CancellationTokenSource? sceneLoadOperation;
     private IReadOnlyList<GameAsset> sceneResources = [];
+    private GameAsset? selectedSceneResource;
     private List<CutsceneMarker> sceneMarkers = [];
     private int sceneCursor;
     private bool scenePlaying;
@@ -66,6 +73,7 @@ internal sealed class MainForm : Form
     private static string? pythonPath;
     private static readonly Dictionary<string, bool> pythonDependencyFallback = new(StringComparer.OrdinalIgnoreCase);
     private static string ToolPath => Path.Combine(AppContext.BaseDirectory, "Tools", "WasInspector");
+    private const string DefaultGamePath = @"D:\Program Files (x86)\Steam\steamapps\common\Red Dead Redemption\game";
     internal sealed record SourceFile(string File, string Label);
     private sealed record ArchiveStamp(string Path, long Length, long LastWriteUtcTicks);
     private sealed record CollectionCache(string Root, int AnimationSetCount, List<ArchiveStamp> Archives, List<SourceFile> Sources);
@@ -85,7 +93,7 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "RDR1 Animation Studio — eSaudia"; Size = new Size(1400, 860); MinimumSize = new Size(1140, 700);
+        Text = "RDR1 Animation Studio — eSaudia"; Size = new Size(1400, 860); MinimumSize = new Size(1140, 700); WindowState = FormWindowState.Maximized;
         Font = new Font("Segoe UI", 10); StartPosition = FormStartPosition.CenterScreen;
         Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "studio.ico"));
         authorPreset.Items.AddRange(["Blank authoring pose", "Spider leap (demo)"]); authorPreset.SelectedIndex = 0;
@@ -102,18 +110,38 @@ internal sealed class MainForm : Form
         actions.Controls.Add(Button("＋ Game folder", async (_, _) => await ChooseGameAsync()));
         actions.Controls.Add(Button("＋ Add WAS", async (_, _) => await AddWasAsync()));
         actions.Controls.Add(Button("✓ Select all", (_, _) => grid.SelectAll()));
-        actions.Controls.Add(Button("↗ Export selected", async (_, _) => await ExportAsync(false)));
+        actions.Controls.Add(Button("☑ Export checked", async (_, _) => await ExportAsync(false, false)));
+        actions.Controls.Add(Button("▣ Open in Blender", async (_, _) => await ExportAsync(false, true)));
         actions.Controls.Add(Button("↗ Export all", async (_, _) => await ExportAsync(true)));
         actions.Controls.Add(Button("× Cancel", (_, _) => operation?.Cancel()));
         var filters = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44 };
         filters.Controls.Add(new Label { Text = "Search", AutoSize = true, Padding = new Padding(0, 3, 5, 0) }); filters.Controls.Add(search);
         filters.Controls.Add(new Label { Text = "Character", AutoSize = true, Padding = new Padding(14, 3, 5, 0) }); filters.Controls.Add(character);
-        filters.Controls.Add(unique); filters.Controls.Add(supported);
+        filters.Controls.Add(unique); filters.Controls.Add(supported); filters.Controls.Add(autoCharacter);
         search.TextChanged += (_, _) => RefreshGrid(); unique.CheckedChanged += (_, _) => RefreshGrid(); supported.CheckedChanged += (_, _) => RefreshGrid();
-        character.SelectedIndexChanged += (_, _) => { previewVersion++; previewTimer.Stop(); previewOperation?.Cancel(); preview.Notice("Select one supported animation to preview."); if (!busy) previewTimer.Start(); };
+        character.SelectedIndexChanged += (_, _) => { previewVersion++; previewOperation?.Cancel(); };
+        character.TextUpdate += (_, _) => FilterCharacters(character.Text);
         SetCharacters([]);
+        Shown += async (_, _) =>
+        {
+            if (!loadDefaultGameOnStartup && Directory.Exists(DefaultGamePath))
+            {
+                loadDefaultGameOnStartup = true;
+                try { await ChooseGameAsync(); }
+                finally { loadDefaultGameOnStartup = false; }
+            }
+        };
+        grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Pick", HeaderText = "✓", Width = 42, FillWeight = 4, ReadOnly = false, SortMode = DataGridViewColumnSortMode.NotSortable });
         foreach (var (name, property, weight) in new[] { ("Animation", "DisplayName", 30), ("Source set", "Set", 25), ("Frames", "Frames", 7), ("FPS", "Fps", 5), ("Seconds", "Duration", 7), ("Status", "Availability", 15) })
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = name, DataPropertyName = property, FillWeight = weight, SortMode = DataGridViewColumnSortMode.Programmatic });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = name, DataPropertyName = property, FillWeight = weight, ReadOnly = true, SortMode = DataGridViewColumnSortMode.Programmatic });
+        grid.CurrentCellDirtyStateChanged += (_, _) => { if (grid.IsCurrentCellDirty) grid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
+        grid.CellValueChanged += (_, e) => {
+            if (e.RowIndex < 0 || !grid.Columns.Contains("Pick") || e.ColumnIndex != grid.Columns["Pick"]!.Index || grid.Rows[e.RowIndex].DataBoundItem is not Clip clip) return;
+            if (Convert.ToBoolean(grid.Rows[e.RowIndex].Cells["Pick"].Value)) checkedClips.Add(clip.Identity); else checkedClips.Remove(clip.Identity);
+        };
+        grid.CellDoubleClick += async (_, e) => {
+            if (e.RowIndex >= 0 && grid.Rows[e.RowIndex].DataBoundItem is Clip) await ExportAsync(false, true);
+        };
         grid.RowTemplate.Height = 34; grid.ColumnHeadersHeight = 42;
         grid.Columns[4].DefaultCellStyle.Format = "0.###";
         grid.ColumnHeaderMouseClick += (_, e) => {
@@ -121,12 +149,17 @@ internal sealed class MainForm : Form
             Func<Clip, object> key = e.ColumnIndex switch { 0 => c => c.Name, 1 => c => c.Set, 2 => c => c.Frames, 3 => c => c.Fps, 4 => c => c.Duration, _ => c => c.Availability };
             grid.DataSource = (ascending ? rows.OrderBy(key) : rows.OrderByDescending(key)).ToList(); ascending = !ascending;
         };
-        grid.SelectionChanged += (_, _) => { if (!busy && grid.SelectedRows.Count == 1 && grid.SelectedRows[0].DataBoundItem is Clip c) status.Text = c.Name + " · " + c.Status + " · Record 0x" + c.Offset.ToString("X") + (c.DuplicateOf.Length > 0 ? " · Same motion: " + c.DuplicateOf : ""); };
-        grid.SelectionChanged += (_, _) => { previewVersion++; previewTimer.Stop(); previewOperation?.Cancel(); preview.Notice("Select one supported animation to preview."); if (!busy) previewTimer.Start(); };
-        previewTimer.Tick += async (_, _) => { previewTimer.Stop(); await PreviewSelectedAsync(); };
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(1000, 650), SplitterDistance = 320, Panel1MinSize = 140, Panel2MinSize = 200 };
-        split.Panel1.Controls.Add(grid); split.Panel2.Controls.Add(preview);
-        libraryPage.Controls.Add(split); libraryPage.Controls.Add(filters); libraryPage.Controls.Add(actions);
+        grid.SelectionChanged += (_, _) => {
+            if (!busy && grid.SelectedRows.Count == 1 && grid.SelectedRows[0].DataBoundItem is Clip c) {
+                if (autoCharacter.Checked) AutoSelectCharacter(c);
+                status.Text = c.Name + " · " + c.Status + " · Record 0x" + c.Offset.ToString("X") + (c.DuplicateOf.Length > 0 ? " · Same motion: " + c.DuplicateOf : "");
+            }
+        };
+        grid.SelectionChanged += (_, _) => { previewVersion++; previewOperation?.Cancel(); };
+        // The embedded viewer was removed from the main library: Blender is the
+        // authoritative preview/export target and the table now uses the full
+        // available height instead of leaving a large empty lower panel.
+        libraryPage.Controls.Add(grid); libraryPage.Controls.Add(filters); libraryPage.Controls.Add(actions);
         infoPage.Controls.Add(info);
         BuildPackPage();
         BuildScenePage();
@@ -142,7 +175,8 @@ internal sealed class MainForm : Form
             _ = CloseWhenIdleAsync();
         };
         Theme();
-        FormClosed += (_, _) => { previewTimer.Stop(); previewTimer.Dispose(); scenePlaybackTimer.Stop(); scenePlaybackTimer.Dispose(); previewOperation?.Cancel(); sceneLoadOperation?.Cancel(); };
+        LoadSollumzSettings();
+        FormClosed += (_, _) => { scenePlaybackTimer.Stop(); scenePlaybackTimer.Dispose(); previewOperation?.Cancel(); sceneLoadOperation?.Cancel(); };
     }
     private async Task CloseWhenIdleAsync()
     {
@@ -183,22 +217,87 @@ internal sealed class MainForm : Form
         {
             string shortName = Path.GetFileNameWithoutExtension(asset.Name);
             if (shortName.Length == 0 || !seen.Add(shortName)) continue;
-            string label = shortName.Replace('_', ' ');
+            string label = CharacterLabel(shortName);
             characters.Add(new CharacterChoice(label + " · game model", asset));
         }
         characters.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Label, b.Label));
         character.DataSource = null;
         character.Items.Clear();
         foreach (var item in characters) character.Items.Add(item);
+        int john = characters.FindIndex(item => item.Asset is not null &&
+            string.Equals(Path.GetFileNameWithoutExtension(item.Asset!.Name), "player_jack_default", StringComparison.OrdinalIgnoreCase));
         int bundled = characters.FindIndex(item => item.Asset is null);
-        if (bundled >= 0) character.SelectedIndex = bundled;
+        character.SelectedIndex = john >= 0 ? john : bundled;
         character.AccessibleName = "Preview character";
         character.AccessibleDescription = "Choose the character mesh used for the animation preview";
         packCharacter.Items.Clear();
         foreach (var item in characters) packCharacter.Items.Add(item);
-        packCharacter.SelectedIndex = bundled >= 0 ? bundled : (packCharacter.Items.Count > 0 ? 0 : -1);
+        packCharacter.SelectedIndex = john >= 0 ? john : (bundled >= 0 ? bundled : (packCharacter.Items.Count > 0 ? 0 : -1));
+    }
+    private static string CharacterLabel(string shortName)
+    {
+        if (shortName.Equals("player_jack_default", StringComparison.OrdinalIgnoreCase)) return "John Marston · default";
+        if (shortName.StartsWith("player_jack_", StringComparison.OrdinalIgnoreCase))
+            return "John Marston · " + shortName[12..].Replace('_', ' ');
+        return shortName.Replace('_', ' ');
+    }
+    private void FilterCharacters(string text)
+    {
+        if (filteringCharacters || !character.Focused || characters.Count == 0) return;
+        string query = text.Trim();
+        var matches = query.Length == 0
+            ? characters
+            : characters.Where(c => c.Label.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+        filteringCharacters = true;
+        try
+        {
+            string current = character.Text;
+            character.BeginUpdate();
+            character.Items.Clear();
+            foreach (var match in matches) character.Items.Add(match);
+            character.Text = current;
+            character.SelectionStart = current.Length;
+            character.SelectionLength = 0;
+            character.DroppedDown = true;
+        }
+        finally { character.EndUpdate(); filteringCharacters = false; }
     }
     private CharacterChoice SelectedCharacter => character.SelectedItem as CharacterChoice ?? characters[0];
+    private void AutoSelectCharacter(Clip clip)
+    {
+        if (selectingCharacterAutomatically || characters.Count == 0) return;
+        string text = (clip.Name + " " + clip.Set + " " + clip.Source).ToLowerInvariant();
+        string[] families = ["sasquatch", "bigfoot", "zombie", "zomb", "horse", "donkey", "bear", "cougar", "wolf", "deer", "boar", "rabbit", "bird", "pike", "snake", "armadillo"];
+        string? family = families.FirstOrDefault(text.Contains);
+        CharacterChoice? match = family is null ? null : characters
+            .Where(c => c.Asset is not null)
+            .OrderByDescending(c => CharacterScore(c, family))
+            .FirstOrDefault(c => CharacterScore(c, family) > 0);
+        // Prefer a real in-game John/player WFT for generic human clips so the
+        // native WTD texture/material path has an asset to work with. Keep the
+        // bundled rig only as the final fallback.
+        match ??= characters.Where(c => c.Asset is not null)
+            .OrderByDescending(c => CharacterScore(c, "player_jack_default"))
+            .ThenByDescending(c => CharacterScore(c, "john"))
+            .ThenByDescending(c => CharacterScore(c, "player"))
+            .FirstOrDefault(c => CharacterScore(c, "player_jack_default") > 0 || CharacterScore(c, "john") > 0 || CharacterScore(c, "player") > 0);
+        /* Keep a second fallback for older scans that do not contain the named
+           player mesh. */
+        match ??= characters.Where(c => c.Asset is not null)
+            .OrderByDescending(c => CharacterScore(c, "john"))
+            .ThenByDescending(c => CharacterScore(c, "player"))
+            .FirstOrDefault(c => CharacterScore(c, "john") > 0 || CharacterScore(c, "player") > 0);
+        match ??= characters.FirstOrDefault(c => c.Asset is null);
+        if (match is null || ReferenceEquals(character.SelectedItem, match)) return;
+        selectingCharacterAutomatically = true;
+        try { character.SelectedItem = match; status.Text = clip.Name + " · auto-matched character: " + match.Label; }
+        finally { selectingCharacterAutomatically = false; }
+    }
+    private static int CharacterScore(CharacterChoice choice, string family)
+    {
+        string text = ((choice.Label ?? "") + " " + (choice.Asset?.Name ?? "") + " " + (choice.Asset?.InternalPath ?? "") + " " + (choice.Asset?.ArchivePath ?? "")).ToLowerInvariant();
+        return text.Contains(family, StringComparison.Ordinal) ? 10 : (family == "sasquatch" && (text.Contains("bigfoot") || text.Contains("ape")) ? 8 : (family == "zombie" && text.Contains("zomb") ? 8 : 0));
+    }
     internal void SaveSnapshot(string output, string? catalogPath)
     {
         if (catalogPath is not null) { var c = JsonSerializer.Deserialize<Catalog>(File.ReadAllText(catalogPath)); if (c is not null) clips.AddRange(c.Clips); }
@@ -220,7 +319,7 @@ internal sealed class MainForm : Form
         title.Text = page == "Library" ? "Animation library" : page;
         libraryPage.Visible = page == "Library"; scenePage.Visible = page == "Scenes"; packPage.Visible = page == "Packs"; infoPage.Visible = !libraryPage.Visible && !scenePage.Visible && !packPage.Visible;
         infoPage.Controls.Clear(); infoPage.Controls.Add(info);
-        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.16 · Scene resource decoding\n\nGame-wide animation discovery, character-aware preview, Blender export and experimental WAS import.\n\nScene selections now use the full semantic decoder when available, exposing bounded VM traces, RBF labels, XML attributes, and conservative track candidates; unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
+        if (page == "About") info.Text = "RDR1 ANIMATION STUDIO\n\nCreated by eSaudia\nCreator & Project Owner\n\nVersion 0.29 · Blender-first animation export\n\nGame-wide animation discovery, character-aware preview, Blender export, experimental WAS import, and reproducible mission/world-cell evidence packages. Animation export now opens the generated Blender scene directly; the JSON report remains beside it for diagnostics.\n\nSelected camera/mission resources are extracted for scene export; verified camera labels, positions, targets and lens values drive the Blender shot timeline when present. WBD bounds and quantized collision geometry are decoded when their RSC6 pointers validate; WVD drawable LODs, models, geometry, vertex declarations, positions, and indices are decoded with pointer/range validation; WSI sector bounds, instance names, hashes, and placement matrices are decoded with pointer/range validation. The world-cell package now includes the full Armadillo WBD/WVD territory set, allowing far more WSI placement hashes to resolve. The placed Blender scene instantiates matched meshes with exact WSI transforms. Shader/material bindings, terrain, room streaming, and mission ownership remain unresolved.\n\nPartial skeleton binding is retained for preview/export and reported explicitly instead of rejecting an otherwise usable clip. Unknown payloads remain unresolved.\n\nBlender is used as an external editor. Python-zstandard license is included in the distribution.\n\nAnimation names are read from game resources. Unknown names are not invented.";
         else if (page == "Scan report") {
             string inventory = gameLibrary is null ? "No game folder scanned yet." :
                 $"Mission resource inventory (identified, not decoded):\n" +
@@ -759,17 +858,27 @@ internal sealed class MainForm : Form
         var split = new SplitContainer { Dock = DockStyle.Fill, Size = new Size(1000, 500), Orientation = Orientation.Vertical, Panel1MinSize = 240, Panel2MinSize = 420, SplitterDistance = 350 };
         split.Panel1.Controls.Add(left); split.Panel2.Controls.Add(right);
         var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 112, Padding = new Padding(0, 12, 0, 0), WrapContents = true };
-        var export = Button("↗ Export sample scene to Blender…", async (_, _) => await ExportSceneSampleAsync()); export.Width = 270;
+        var export = Button("↗ Export selected resource scene…", async (_, _) => await ExportRealSceneAsync()); export.Width = 270;
+        var showcase = Button("🎬 Build original-audio mission showcase…", async (_, _) => await BuildMissionShowcaseAsync()); showcase.Width = 300;
+        var worldCell = Button("⬢ Extract world-cell evidence…", async (_, _) => await ExtractWorldCellEvidenceAsync()); worldCell.Width = 245;
+        var placedWorld = Button("▣ Build placed world-cell Blender scene…", async (_, _) => await BuildPlacedWorldCellSceneAsync()); placedWorld.Width = 290;
         var play = Button("▶ Play a Blender scene…", async (_, _) => await PlaySceneAsync()); play.Width = 220;
         var render = Button("● Render selected/current to MP4…", async (_, _) => await RenderSceneAsync()); render.Width = 270;
         footer.Controls.Add(export);
+        footer.Controls.Add(showcase);
+        footer.Controls.Add(worldCell);
+        footer.Controls.Add(placedWorld);
         footer.Controls.Add(play); footer.Controls.Add(render);
-        footer.Controls.Add(new Label { Text = "Select one supported animation in Library to render its exact motion; otherwise the last opened Blender scene is used. Resource tracks remain evidence-only until camera/event payloads are decoded.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
+        footer.Controls.Add(new Label { Text = "World-cell export preserves exact RPF bytes and builds a Blender preview from pointer-validated WSI transforms and WVD indexed meshes; terrain, materials, room streaming, audio, and mission ownership remain unresolved.", AutoSize = true, Padding = new Padding(4, 10, 0, 0) });
         sceneTimeline.Paint += (_, e) => PaintSceneTimeline(e.Graphics, sceneTimeline.ClientSize);
         sceneScrubber.ValueChanged += (_, _) => { sceneCursor = sceneScrubber.Value; UpdateSceneClock(); sceneTimeline.Invalidate(); };
         sceneSearch.TextChanged += (_, _) => RefreshSceneResources(); sceneFilter.SelectedIndexChanged += (_, _) => RefreshSceneResources();
         sceneResourceList.Format += (_, e) => { if (e.ListItem is GameAsset asset) e.Value = $"{asset.Name}  ·  {asset.Kind}"; };
-        sceneResourceList.SelectedIndexChanged += async (_, _) => await LoadSelectedSceneResourceAsync();
+        sceneResourceList.SelectedIndexChanged += async (_, _) =>
+        {
+            selectedSceneResource = sceneResourceList.SelectedItem as GameAsset;
+            await LoadSelectedSceneResourceAsync();
+        };
         scenePlaybackTimer.Tick += (_, _) => AdvanceScenePlayback();
         scenePage.Controls.Add(split); scenePage.Controls.Add(footer); scenePage.Controls.Add(browserBar); scenePage.Controls.Add(heading);
         sceneDetails.Text = "Choose a game folder in Library to populate mission and camera resources.\n\nYou can also open an existing *.semantics.json report directly.";
@@ -979,7 +1088,8 @@ internal sealed class MainForm : Form
     {
         if (busy) return;
         string? exe = Blender(); if (exe is null) return;
-        using var save = new SaveFileDialog { Title = "Save sample scene", Filter = "Blender scene|*.blend", FileName = "RDR1-intro-scene-sample.blend", AddExtension = true, OverwritePrompt = true };
+        string sceneStem = SelectedRealSceneStem();
+        using var save = new SaveFileDialog { Title = "Save sample scene", Filter = "Blender scene|*.blend", FileName = sceneStem + "-scene-sample.blend", AddExtension = true, OverwritePrompt = true };
         if (save.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token =>
         {
@@ -989,6 +1099,259 @@ internal sealed class MainForm : Form
             if (MessageBox.Show(this, "Sample scene exported. Open it in Blender now?", "Scene exporter", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 LaunchScenePlayback(exe, save.FileName);
         });
+    }
+    private async Task ExportRealSceneAsync()
+    {
+        if (busy) return;
+        string? exe = Blender(); if (exe is null) return;
+        string sceneStem = SelectedRealSceneStem();
+        GameAsset? selectedResource = selectedSceneResource ?? sceneResourceList.SelectedItem as GameAsset;
+        using var save = new SaveFileDialog
+        {
+            Title = "Save real RDR1 scene preview",
+            Filter = "Blender scene|*.blend",
+            FileName = sceneStem + "-real-scene.blend",
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            string script = Path.Combine(ToolPath, "blender_real_scene.py");
+            string baseBlend = Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend");
+            if (!File.Exists(script)) throw new FileNotFoundException("The real-scene builder is missing from this installation.", script);
+            if (!File.Exists(baseBlend)) throw new FileNotFoundException("The bundled RDR1 character scene is missing.", baseBlend);
+            status.Text = "Building real RDR1 scene preview…";
+            string? semanticReport = null;
+            string sourcePath = selectedResource?.InternalPath ?? "";
+            string sceneName = selectedResource?.Name ?? sceneStem;
+            string sceneKind = selectedResource?.Kind.ToString() ?? "Unknown";
+            string job = Job();
+            if (selectedResource is not null && gameLibrary is not null)
+            {
+                string rawResource = Path.Combine(job, "selected-resource.bin");
+                await File.WriteAllBytesAsync(rawResource, GameLibrary.Extract(selectedResource, archiveNames), token);
+                semanticReport = Path.Combine(job, "selected-resource.semantics.json");
+                try
+                {
+                    string extension = Path.GetExtension(selectedResource.Name).ToLowerInvariant();
+                    string decoder = extension is ".wvd" or ".wbd" or ".wsi" ? "world_resource_inspector.py" : extension == ".wtd" ? "wtd_texture_inspector.py" : "resource_semantics.py";
+                    await Python(decoder, [rawResource, "--output", semanticReport], token);
+                }
+                catch (Exception ex)
+                {
+                    status.Text = "Camera semantics unavailable; using resource fallback · " + ex.Message;
+                    semanticReport = null;
+                }
+            }
+            var blenderArgs = new List<string> { "--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", baseBlend, "--output", save.FileName, "--scene-name", sceneName, "--scene-kind", sceneKind, "--source-path", sourcePath };
+            if (semanticReport is not null) { blenderArgs.Add("--semantic-report"); blenderArgs.Add(semanticReport); }
+            await Execute(exe, blenderArgs.ToArray(), token);
+            lastSceneBlend = save.FileName;
+            status.Text = "Real scene preview created · " + Path.GetFileName(save.FileName);
+            if (MessageBox.Show(this,
+                "Selected resource scene created.\n\nThe Blender manifest records the selected resource and camera payload confidence. Verified camera shots are used when available; otherwise a clearly labeled fallback is used.\n\nOpen it in Blender camera view now?",
+                "Real scene preview", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                LaunchScenePlayback(exe, save.FileName);
+        });
+    }
+    private async Task BuildMissionShowcaseAsync()
+    {
+        if (busy) return;
+        if (gameLibrary is null)
+        {
+            MessageBox.Show(this, "Choose the RDR1 game folder first so the studio can extract the mission and its audio bank.", "Mission showcase", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        GameAsset? mission = selectedSceneResource?.Kind == GameAssetKind.MissionScript
+            ? selectedSceneResource
+            : gameLibrary.MissionScripts.FirstOrDefault(asset => asset.Name.Contains("dlc_find_blunderbuss", StringComparison.OrdinalIgnoreCase));
+        if (mission is null || !mission.Name.Contains("dlc_find_blunderbuss", StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show(this, "This first showcase is wired to DLC_Find_Blunderbuss, the mission whose decoded John motion and interaction definition are bundled with the studio. Search for dlc_find_blunderbuss.wsc and select it first.", "Mission showcase", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        GameAsset? bank = gameLibrary.Audio
+            .Where(asset => asset.Name.Contains("blunderbuss", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(asset => asset.InternalPath.Contains("dlc3_zombie", StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault();
+        if (bank is null)
+        {
+            MessageBox.Show(this, "The scan did not find the mission's blunderbuss AWC bank. Re-scan the game folder and try again.", "Mission showcase", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        string? exe = Blender(); if (exe is null) return;
+        string baseBlend = Path.Combine(AppContext.BaseDirectory, "Assets", "dlc_find_blunderbuss.blend");
+        if (!File.Exists(baseBlend))
+        {
+            MessageBox.Show(this, "The bundled DLC_Find_Blunderbuss motion scene is missing from this installation.", "Mission showcase", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        string defaultName = "DLC_Find_Blunderbuss-original-audio.blend";
+        using var save = new SaveFileDialog { Title = "Save mission showcase scene", Filter = "Blender scene|*.blend", FileName = defaultName, AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            string job = Job();
+            try
+            {
+                string bankFile = Path.Combine(job, "blunderbuss.awc");
+                await File.WriteAllBytesAsync(bankFile, GameLibrary.Extract(bank, archiveNames), token);
+                string members = Path.Combine(job, "wav");
+                await Python("awc_extract.py", [bankFile, members], token);
+                string[] wavs = Directory.GetFiles(members, "*.wav").OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+                if (wavs.Length == 0) throw new InvalidDataException("The AWC bank contained no RIFF/WAVE members.");
+                string sfx = wavs.Length > 2 ? wavs[2] : wavs[^1];
+                string script = Path.Combine(ToolPath, "blender_mission_cinematic.py");
+                await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--base-blend", baseBlend, "--output", save.FileName, "--audio", wavs[0], "--sfx", sfx], token);
+                lastSceneBlend = save.FileName;
+                status.Text = "Mission showcase created · original AWC audio embedded · " + Path.GetFileName(save.FileName);
+                string manifest = Path.ChangeExtension(save.FileName, ".manifest.json");
+                string message = "DLC_Find_Blunderbuss showcase created.\n\nOriginal game audio was extracted from the AWC bank and embedded as Blender sound strips. The environment is clearly marked as presentation proxy geometry; the streamed original world is not silently fabricated.\n\nScene:\n" + save.FileName + (File.Exists(manifest) ? "\n\nManifest:\n" + manifest : "");
+                if (MessageBox.Show(this, message + "\n\nOpen it in Blender now?", "Mission showcase complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    LaunchScenePlayback(exe, save.FileName);
+            }
+            finally { try { Directory.Delete(job, true); } catch { } }
+        });
+    }
+    private async Task ExtractWorldCellEvidenceAsync()
+    {
+        if (busy) return;
+        if (gameLibrary is null)
+        {
+            MessageBox.Show(this, "Choose the RDR1 game folder first so the studio can extract the mission and candidate world cell.", "World-cell evidence", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        GameAsset? selectedMission = selectedSceneResource?.Kind == GameAssetKind.MissionScript
+            ? selectedSceneResource
+            : gameLibrary.MissionScripts.FirstOrDefault(asset => asset.Name.Contains("dlc_find_blunderbuss", StringComparison.OrdinalIgnoreCase));
+        if (selectedMission is null)
+        {
+            MessageBox.Show(this, "No mission resource is selected. Search for DLC_Find_Blunderbuss or select a mission first.", "World-cell evidence", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        using var dialog = new FolderBrowserDialog { Description = "Choose a folder for the world-cell evidence package", UseDescriptionForTitle = true };
+        if (!loadDefaultGameOnStartup && dialog.ShowDialog(this) != DialogResult.OK) return;
+        string stem = Path.GetFileNameWithoutExtension(selectedMission.Name);
+        string safeStem = string.Concat(stem.Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_'));
+        string output = Path.Combine(dialog.SelectedPath, safeStem + "-world-cell-evidence-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+        await Operation(async token =>
+        {
+            status.Text = "Extracting mission, camera, audio, and candidate world-cell evidence…";
+            string manifest = await Task.Run(() => WorldCellPackage.Write(gameLibrary, archiveNames, stem, output, token), token);
+            int count = 0;
+            int reports = 0;
+            int decodedDrawables = 0;
+            int decodedModels = 0;
+            int decodedGeometries = 0;
+            int decodedVertices = 0;
+            int decodedIndices = 0;
+            int placementMatches = 0;
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(manifest, token));
+                count = document.RootElement.GetProperty("counts").GetProperty("total").GetInt32();
+                // Keep the raw package authoritative, then add bounded semantic
+                // reports for the resources the current decoder can inspect.
+                // A failed report never removes or changes the byte-preserved
+                // input, and is recorded in the status text instead.
+                foreach (JsonElement item in document.RootElement.GetProperty("files").EnumerateArray())
+                {
+                    string role = item.GetProperty("role").GetString() ?? "";
+                    if (role is "audio" or "animation") continue;
+                    string relative = item.GetProperty("relativePath").GetString() ?? "";
+                    string input = Path.GetFullPath(Path.Combine(output, relative.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!input.StartsWith(Path.GetFullPath(output) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !File.Exists(input)) continue;
+                    string report = input + ".semantics.json";
+                    string decoder = role is "world-cell-metadata" or "world-cell-geometry" or "world-cell-placement"
+                        ? "world_resource_inspector.py"
+                        : "resource_semantics.py";
+                    try
+                    {
+                        await Python(decoder, [input, "--output", report], token);
+                        if (File.Exists(report))
+                        {
+                            reports++;
+                            using JsonDocument semantic = JsonDocument.Parse(await File.ReadAllTextAsync(report, token));
+                            if (semantic.RootElement.TryGetProperty("decoded", out JsonElement decoded) &&
+                                decoded.TryGetProperty("counts", out JsonElement countsElement))
+                            {
+                                decodedDrawables += ReadReportCount(countsElement, "decodedDrawables");
+                                decodedModels += ReadReportCount(countsElement, "decodedModels");
+                                decodedGeometries += ReadReportCount(countsElement, "decodedGeometries");
+                                decodedVertices += ReadReportCount(countsElement, "decodedVertices");
+                                decodedIndices += ReadReportCount(countsElement, "decodedIndices");
+                            }
+                        }
+                    }
+                    catch { /* raw evidence remains valid when a decoder is unavailable */ }
+                }
+                string placementReport = Path.Combine(output, "placement-join.json");
+                try
+                {
+                    await Python("placement_join.py", [output, "--output", placementReport], token);
+                    if (File.Exists(placementReport))
+                    {
+                        using JsonDocument join = JsonDocument.Parse(await File.ReadAllTextAsync(placementReport, token));
+                        if (join.RootElement.TryGetProperty("counts", out JsonElement placementCounts))
+                            placementMatches = ReadReportCount(placementCounts, "matchedInstances");
+                        if (placementMatches > 0) reports++;
+                    }
+                }
+                catch { /* WSI evidence remains useful when a join is unavailable */ }
+            }
+            catch { }
+            status.Text = $"World-cell evidence complete · {count:N0} files · {reports:N0} reports · {placementMatches:N0} placed meshes matched · {decodedVertices:N0} vertices · {decodedIndices:N0} indices";
+            MessageBox.Show(this,
+                "Evidence package created.\n\n" + output + "\n\n" +
+                $"It contains world-cell.manifest.json, exact extracted inputs, SHA-256 hashes, and {reports:N0} bounded semantic reports. WVD mesh evidence: {decodedDrawables:N0} drawables, {decodedModels:N0} models, {decodedGeometries:N0} geometries, {decodedVertices:N0} vertices, {decodedIndices:N0} indices. WSI placement evidence: {placementMatches:N0} instances matched to visual dictionaries by exact hash. Secondary room/material bindings and mission-to-cell identity remain explicitly unresolved.",
+                "World-cell evidence complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            try { Process.Start(new ProcessStartInfo("explorer.exe", output) { UseShellExecute = true }); } catch { }
+        });
+    }
+    private static int ReadReportCount(JsonElement counts, string name)
+    {
+        return counts.TryGetProperty(name, out JsonElement value) && value.TryGetInt32(out int count) ? count : 0;
+    }
+    private async Task BuildPlacedWorldCellSceneAsync()
+    {
+        if (busy) return;
+        string? exe = Blender(); if (exe is null) return;
+        using var folder = new FolderBrowserDialog { Description = "Choose a v0.25 world-cell evidence package containing placement-join.json", UseDescriptionForTitle = true };
+        if (folder.ShowDialog(this) != DialogResult.OK) return;
+        string package = Path.GetFullPath(folder.SelectedPath);
+        string join = Path.Combine(package, "placement-join.json");
+        if (!File.Exists(join))
+        {
+            MessageBox.Show(this, "This folder does not contain placement-join.json. Extract world-cell evidence first, then choose that package folder.", "Placed world-cell scene", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        string defaultName = Path.GetFileName(package.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) + "-placement.blend";
+        using var save = new SaveFileDialog { Title = "Save placed world-cell Blender scene", Filter = "Blender scene|*.blend", FileName = defaultName, InitialDirectory = package, AddExtension = true, OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        await Operation(async token =>
+        {
+            status.Text = "Building Blender scene from validated WSI transforms and WVD meshes…";
+            string script = Path.Combine(ToolPath, "blender_world_cell.py");
+            await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", "--package", package, "--output", save.FileName], token);
+            lastSceneBlend = save.FileName;
+            status.Text = "Placed world-cell Blender scene created · " + Path.GetFileName(save.FileName);
+            if (MessageBox.Show(this, "Placed world-cell Blender scene created. Open it in Blender now?", "Placed world-cell scene", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                Process.Start(new ProcessStartInfo(exe, save.FileName) { UseShellExecute = true });
+        });
+    }
+    private string SelectedRealSceneStem()
+    {
+        string raw = selectedSceneResource is GameAsset selected
+            ? Path.GetFileNameWithoutExtension(selected.Name)
+            : sceneResourceList.SelectedItem is GameAsset asset
+                ? Path.GetFileNameWithoutExtension(asset.Name)
+            : "RDR1-main-street";
+        if (string.IsNullOrWhiteSpace(raw)) raw = "RDR1-scene";
+        var chars = raw.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '-').ToArray();
+        string stem = new string(chars).Trim('-');
+        while (stem.Contains("--", StringComparison.Ordinal)) stem = stem.Replace("--", "-");
+        return stem.Length == 0 ? "RDR1-scene" : stem;
     }
     private async Task PlaySceneAsync()
     {
@@ -1101,7 +1464,8 @@ internal sealed class MainForm : Form
     private async Task CreatePackAsync()
     {
         if (busy) return;
-        var selected = grid.SelectedRows.Cast<DataGridViewRow>().Select(r => r.DataBoundItem as Clip).Where(c => c is not null).Cast<Clip>().Where(c => c.Status == "Supported").DistinctBy(c => c.Identity).ToList();
+        var checkedForPack = grid.Rows.Cast<DataGridViewRow>().Where(r => r.DataBoundItem is Clip && Convert.ToBoolean(r.Cells["Pick"].Value)).Select(r => (Clip)r.DataBoundItem!).ToList();
+        var selected = (checkedForPack.Count > 0 ? checkedForPack : grid.SelectedRows.Cast<DataGridViewRow>().Select(r => r.DataBoundItem as Clip).Where(c => c is not null).Cast<Clip>().ToList()).Where(c => c.Status == "Supported").DistinctBy(c => c.Identity).ToList();
         if (selected.Count == 0) { MessageBox.Show(this, "Select at least one supported clip in Library first.", "Create animation pack"); return; }
         string name = packName.Text.Trim();
         foreach (char invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
@@ -1153,18 +1517,23 @@ internal sealed class MainForm : Form
     private void RefreshGrid() {
         var selected = grid.SelectedRows.Cast<DataGridViewRow>().Select(r => (r.DataBoundItem as Clip)?.Identity).ToHashSet(); string query = search.Text.Trim();
         grid.DataSource = clips.Where(c => (!unique.Checked || c.DuplicateOf.Length == 0) && (!supported.Checked || c.Status == "Supported") && (query.Length == 0 || c.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || c.Set.Contains(query, StringComparison.OrdinalIgnoreCase))).ToList();
+        foreach (DataGridViewRow row in grid.Rows) if (row.DataBoundItem is Clip clip) row.Cells["Pick"].Value = checkedClips.Contains(clip.Identity);
         grid.ClearSelection(); foreach (DataGridViewRow row in grid.Rows) if (row.DataBoundItem is Clip c && selected.Contains(c.Identity)) row.Selected = true;
         summary.Text = $"{clips.Count:N0} clips · {clips.Count(c => c.Status == "Supported"):N0} supported · {clips.Count(c => c.DuplicateOf.Length > 0):N0} identical · {grid.Rows.Count:N0} shown";
     }
     private async Task Operation(Func<CancellationToken, Task> action) {
-        if (busy) return; busy = true; previewTimer.Stop(); previewVersion++; previewOperation?.Cancel(); operation = new();
+        if (busy) return; busy = true; previewVersion++; previewOperation?.Cancel(); operation = new();
         try { await action(operation.Token); } catch (OperationCanceledException) { status.Text = "Cancelled. Completed files retained."; }
         catch (Exception ex) { status.Text = "Operation failed"; MessageBox.Show(this, ex.Message, "RDR1 Animation Studio", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { busy = false; operation.Dispose(); operation = null; }
     }
     private async Task ChooseGameAsync() {
         if (busy) return;
-        using var dialog = new FolderBrowserDialog { Description = "Choose Red Dead Redemption or its game folder", UseDescriptionForTitle = true };
+        using var dialog = new FolderBrowserDialog {
+            Description = "Choose Red Dead Redemption or its game folder",
+            UseDescriptionForTitle = true,
+            SelectedPath = Directory.Exists(DefaultGamePath) ? DefaultGamePath : string.Empty
+        };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         await Operation(async token => {
             var path = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt"); var names = File.Exists(path) ? Rpf6Archive.LoadNames(path) : new Dictionary<uint, string>();
@@ -1261,7 +1630,10 @@ internal sealed class MainForm : Form
             }
             catch { return new { source.File, source.Label, Length = -1L, LastWriteUtcTicks = -1L }; }
         }).ToList();
-        string payload = "v0.10-catalog-2\n" + JsonSerializer.Serialize(identity);
+        // Bump the cache schema whenever the Python decoder changes.  Reusing
+        // an older catalog can incorrectly keep clips marked "Needs decoder
+        // work" even though the current executable can export them.
+        string payload = "v0.12-catalog-auxiliary-tracks\n" + JsonSerializer.Serialize(identity);
         string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload)))[..32];
         string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Cache", "Catalogs");
         Directory.CreateDirectory(root);
@@ -1300,44 +1672,168 @@ internal sealed class MainForm : Form
         clips.Clear(); clips.AddRange(result.Clips); sources.Clear(); sources.AddRange(input); problems.Clear(); problems.AddRange(result.Errors.Select(e => e.ToString()));
         RefreshGrid(); status.Text = "Collection complete. Unsupported animations are explained in Scan report.";
     }
-    private async Task ExportAsync(bool all) {
+    private async Task ExportAsync(bool all, bool directOpen = false) {
         if (busy) return;
-        var selected = all ? clips.ToList() : grid.SelectedRows.Cast<DataGridViewRow>().Select(r => (Clip)r.DataBoundItem!).ToList();
+        var checkedRows = grid.Rows.Cast<DataGridViewRow>().Where(r => r.DataBoundItem is Clip && Convert.ToBoolean(r.Cells["Pick"].Value)).Select(r => (Clip)r.DataBoundItem!).ToList();
+        var selected = all ? clips.ToList() : (checkedRows.Count > 0 ? checkedRows : grid.SelectedRows.Cast<DataGridViewRow>().Select(r => (Clip)r.DataBoundItem!).ToList());
         if (selected.Count == 0) { status.Text = "Select clips or scan a game folder first."; return; }
         string? exe = Blender(); if (exe is null) return;
-        using var d = new FolderBrowserDialog { Description = "Choose Blender export folder", UseDescriptionForTitle = true }; if (d.ShowDialog(this) != DialogResult.OK) return;
+        string? destination = null;
+        if (!directOpen) { using var d = new FolderBrowserDialog { Description = "Choose Blender export folder", UseDescriptionForTitle = true }; if (d.ShowDialog(this) != DialogResult.OK) return; destination = d.SelectedPath; }
         await Operation(async token => {
-            string manifest = Path.Combine(Job(), "selection.json"), output = Path.Combine(d.SelectedPath, "RDR1-Export-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6]);
+            // A direct export can be clicked before the automatic startup scan
+            // finishes.  Resolve the native John mesh before creating the
+            // Blender scene so the bundled placeholder is never exported by
+            // accident when the game is installed at the standard path.
+            await EnsureNativeCharacterAsync(token);
+            string manifest = Path.Combine(Job(), "selection.json");
+            string root = directOpen ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "DirectBlender") : destination!;
+            Directory.CreateDirectory(root);
+            string output = Path.Combine(root, "RDR1-Export-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6]);
             await File.WriteAllTextAsync(manifest, JsonSerializer.Serialize(selected), token);
             await Python("studio_library.py", ["export", manifest, output, "--blender", exe, "--skeleton", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.skeleton.csv"), "--base-blend", Path.Combine(AppContext.BaseDirectory, "Assets", "player_default.blend")], token);
-            status.Text = "Export complete. Review export-report.json for skipped clips.";
             string reportPath = Path.Combine(output, "export-report.json");
-            if (MessageBox.Show(this, "Saved Blender Actions and export report:\n" + output + "\n\nUnsupported clips are reported without substituting another animation.\n\nOpen the export report in the JSON viewer now?", "Export complete", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                ShowJsonReport(reportPath);
+            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath, token));
+            var firstBlend = report.RootElement.GetProperty("exported").EnumerateArray().Select(item => item.TryGetProperty("file", out var file) ? file.GetString() : null).FirstOrDefault(file => !string.IsNullOrWhiteSpace(file) && File.Exists(file));
+            if (firstBlend is null) throw new InvalidOperationException("Export completed without a Blender scene. See export-report.json for details.");
+            // Replace the bundled preview mesh with decoded WFT geometry whenever
+            // a native character is selected.  The old exporter intentionally
+            // used player_default.blend as a rigging helper; keeping that mesh
+            // made every export look like the same generic John.
+            if (SelectedCharacter.Asset is not null)
+            {
+                try
+                {
+                    string sourceGltf = Path.ChangeExtension(firstBlend, ".gltf");
+                    if (File.Exists(sourceGltf))
+                    {
+                        status.Text = "Decoding native WFT character geometry…";
+                        string geometry = await PrepareCharacterGeometryAsync(SelectedCharacter.Asset, token);
+                        string merged = Path.Combine(Path.GetDirectoryName(firstBlend)!, Path.GetFileNameWithoutExtension(firstBlend) + ".character.gltf");
+                        await Python("wft_gltf_merge.py", [sourceGltf, geometry, "--output", merged], token);
+                        string nativeBlend = Path.Combine(Path.GetDirectoryName(firstBlend)!, Path.GetFileNameWithoutExtension(firstBlend) + ".character.blend");
+                        await Execute(exe, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_gltf_to_blend.py"), "--", "--input", merged, "--output", nativeBlend], token);
+                        if (File.Exists(nativeBlend)) firstBlend = nativeBlend;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Keep the export usable if a particular WFT is evidence-only
+                    // or lacks a matching decoder; the report remains beside it.
+                    status.Text = "Native character replacement skipped: " + ex.Message[..Math.Min(ex.Message.Length, 180)];
+                }
+            }
+            string focusedBlend = Path.Combine(Path.GetDirectoryName(firstBlend)!, Path.GetFileNameWithoutExtension(firstBlend) + ".focused.blend");
+            try
+            {
+                await Execute(exe, ["--background", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_focus_scene.py"), "--", "--input", firstBlend, "--output", focusedBlend], token);
+                if (File.Exists(focusedBlend)) firstBlend = focusedBlend;
+            }
+            catch (Exception ex) { status.Text = "Camera framing skipped: " + ex.Message[..Math.Min(ex.Message.Length, 160)]; }
+            // Blender is the primary result of animation export. The JSON report
+            // remains beside the scenes for diagnostics, but is no longer forced
+            // into the user's workflow.
+            string openedBlend = await TryApplySollumzAsync(firstBlend, selected[0], exe, token);
+            openedBlend = await TryApplyNativeMaterialsAsync(openedBlend, exe, token);
+            Process.Start(new ProcessStartInfo(exe, $"--python \"{Path.Combine(ToolPath, "blender_open_camera.py")}\" \"{openedBlend}\"") { UseShellExecute = true });
+            status.Text = (directOpen ? "Opened directly in Blender · " : "Export complete · opened in Blender: ") + Path.GetFileName(openedBlend);
+            if (!directOpen) MessageBox.Show(this, $"Opened the exported Blender scene:\n{firstBlend}\n\nThe full export report is beside it at:\n{reportPath}\n\nFor multi-clip exports, Blender opened the first scene; the remaining .blend files are in the same folder.", "Export complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
         });
+    }
+
+    private string SollumzSettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "sollumz.json");
+    private sealed record SollumzSettings(string? AddonRoot, string? XmlRoot);
+    private void LoadSollumzSettings()
+    {
+        try
+        {
+            if (!File.Exists(SollumzSettingsPath)) return;
+            var s = JsonSerializer.Deserialize<SollumzSettings>(File.ReadAllText(SollumzSettingsPath));
+            if (s is not null && Directory.Exists(s.AddonRoot) && Directory.Exists(s.XmlRoot)) { sollumzAddonRoot = s.AddonRoot; sollumzXmlRoot = s.XmlRoot; }
+        }
+        catch { }
+    }
+    private void SaveSollumzSettings()
+    {
+        try { Directory.CreateDirectory(Path.GetDirectoryName(SollumzSettingsPath)!); File.WriteAllText(SollumzSettingsPath, JsonSerializer.Serialize(new SollumzSettings(sollumzAddonRoot, sollumzXmlRoot), new JsonSerializerOptions { WriteIndented = true })); }
+        catch { }
+    }
+    private async Task ConfigureSollumzAsync()
+    {
+        using var addon = new FolderBrowserDialog { Description = "Choose the SollumzRDR add-on folder (the folder containing __init__.py).", UseDescriptionForTitle = true, SelectedPath = sollumzAddonRoot ?? "" };
+        if (addon.ShowDialog(this) != DialogResult.OK) return;
+        if (!File.Exists(Path.Combine(addon.SelectedPath, "__init__.py"))) { MessageBox.Show(this, "That folder does not contain SollumzRDR __init__.py.", "SollumzRDR setup", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        using var xml = new FolderBrowserDialog { Description = "Choose the folder containing CodeX-exported WFD/WVD XML files.", UseDescriptionForTitle = true, SelectedPath = sollumzXmlRoot ?? "" };
+        if (xml.ShowDialog(this) != DialogResult.OK) return;
+        if (!Directory.EnumerateFiles(xml.SelectedPath, "*.wf?", SearchOption.AllDirectories).Any()) { MessageBox.Show(this, "No .wfd or .wvd XML files were found below that folder.", "SollumzRDR setup", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        sollumzAddonRoot = addon.SelectedPath; sollumzXmlRoot = xml.SelectedPath; SaveSollumzSettings();
+        status.Text = "SollumzRDR bridge configured · materials/clothing will be applied when a matching WFD/WVD is found.";
+        await Task.CompletedTask;
+    }
+    private async Task<string> TryApplySollumzAsync(string blend, Clip clip, string exe, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(sollumzAddonRoot) || string.IsNullOrWhiteSpace(sollumzXmlRoot) || !Directory.Exists(sollumzAddonRoot) || !Directory.Exists(sollumzXmlRoot)) return blend;
+        string? xml = FindSollumzResource(clip);
+        if (xml is null) return blend;
+        string output = Path.Combine(Path.GetDirectoryName(blend)!, Path.GetFileNameWithoutExtension(blend) + ".sollumz.blend");
+        string bridge = Path.Combine(ToolPath, "blender_sollumz_bridge.py");
+        try
+        {
+            status.Text = "Applying SollumzRDR materials/clothing…";
+            await Execute(exe, ["--background", "--python-exit-code", "1", "--python", bridge, "--", "--blend", blend, "--xml", xml, "--addon-dir", sollumzAddonRoot, "--output", output], token);
+            if (File.Exists(output)) return output;
+        }
+        catch (Exception ex) { status.Text = "SollumzRDR bridge skipped: " + ex.Message[..Math.Min(ex.Message.Length, 180)]; }
+        return blend;
+    }
+    private string? FindSollumzResource(Clip clip)
+    {
+        if (string.IsNullOrWhiteSpace(sollumzXmlRoot)) return null;
+        string text = (clip.Name + " " + clip.Set + " " + clip.Source).ToLowerInvariant();
+        var terms = new[] { "sasquatch", "bigfoot", "zombie", "horse", "bear", "john", "marston" }.Where(text.Contains).ToArray();
+        var files = Directory.EnumerateFiles(sollumzXmlRoot, "*.wfd", SearchOption.AllDirectories).Concat(Directory.EnumerateFiles(sollumzXmlRoot, "*.wvd", SearchOption.AllDirectories));
+        return files.Select(f => new { File = f, Score = terms.Sum(t => Path.GetFileNameWithoutExtension(f).ToLowerInvariant().Contains(t) ? 10 : 0) + (f.EndsWith(".wfd", StringComparison.OrdinalIgnoreCase) ? 2 : 0) }).OrderByDescending(x => x.Score).ThenBy(x => x.File.Length).FirstOrDefault(x => x.Score > 0)?.File;
+    }
+    private async Task<string> TryApplyNativeMaterialsAsync(string blend, string exe, CancellationToken token)
+    {
+        CharacterChoice choice = SelectedCharacter;
+        if (choice.Asset is null) return blend;
+        try
+        {
+            await PrepareCharacterGeometryAsync(choice.Asset, token);
+            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(choice.Asset.ArchivePath + "|" + choice.Asset.InternalPath + "|" + choice.Asset.EntryIndex + "|" + choice.Asset.Size)));
+            string textureDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Characters", key + "-textures");
+            if (!Directory.Exists(textureDir) || !Directory.EnumerateFiles(textureDir, "*.dds").Any()) return blend;
+            string output = Path.Combine(Path.GetDirectoryName(blend)!, Path.GetFileNameWithoutExtension(blend) + ".native-materials.blend");
+            await Execute(exe, ["--background", "--python-exit-code", "1", "--python", Path.Combine(ToolPath, "blender_apply_native_materials.py"), "--", "--blend", blend, "--texture-dir", textureDir, "--output", output], token);
+            return File.Exists(output) ? output : blend;
+        }
+        catch (Exception ex) { status.Text = "Native material application skipped: " + ex.Message[..Math.Min(ex.Message.Length, 160)]; return blend; }
     }
     private async Task PreviewSelectedAsync()
     {
         if (busy || grid.SelectedRows.Count != 1 || grid.SelectedRows[0].DataBoundItem is not Clip clip) return;
-        if (clip.Status != "Supported") { preview.Notice("This clip cannot be decoded reliably yet.\n" + clip.Status); return; }
+        bool exactMotion = clip.Status == "Supported";
         CharacterChoice selectedCharacter = SelectedCharacter;
         string? exe = Blender(); if (exe is null) { preview.Notice("Blender is required to prepare the character preview."); return; }
         int version = previewVersion;
         using var cancellation = new CancellationTokenSource(); previewOperation = cancellation;
         var token = cancellation.Token;
         try {
-            preview.Notice("Preparing " + selectedCharacter.Label + "…\nFirst preview requires Blender conversion; repeat previews are cached.");
+            preview.Notice((exactMotion ? "Preparing " : "Preparing best-effort preview ") + selectedCharacter.Label + "…\nFirst preview requires Blender conversion; repeat previews are cached.");
             string assets = Path.Combine(AppContext.BaseDirectory, "Assets");
             string characterKey = selectedCharacter.Asset is null ? "john-bundled" : selectedCharacter.Asset.ArchivePath + "|" + selectedCharacter.Asset.InternalPath + "|" + selectedCharacter.Asset.EntryIndex;
             // Bump the cache namespace after fixing armature export; existing v0.10
             // previews may contain mesh-only GLBs and must be regenerated.
-            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("v010.1-character|" + characterKey + "|" + clip.Identity + "|" + clip.Fingerprint)));
+            // Bump this when the preview transport or Blender export changes so
+            // an old failed GLB cannot keep the UI stuck on a stale cache entry.
+            string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("v027.2-preview-transport|" + characterKey + "|" + clip.Identity + "|" + clip.Fingerprint)));
             string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RDR1AnimationStudio", "Preview", key);
             Directory.CreateDirectory(folder); string model = Path.Combine(folder, "preview.glb");
             if (!File.Exists(model)) {
                 string request = Path.Combine(folder, "selection.json");
                 await File.WriteAllTextAsync(request, JsonSerializer.Serialize(new[] { clip }), token);
-                await Python("studio_library.py", ["export", request, folder, "--blender", exe, "--skeleton", Path.Combine(assets, "player_default.skeleton.csv"), "--base-blend", Path.Combine(assets, "player_default.blend")], token);
+                await Python("studio_library.py", ["export", request, folder, "--blender", exe, "--skeleton", Path.Combine(assets, "player_default.skeleton.csv"), "--base-blend", Path.Combine(assets, "player_default.blend"), "--best-effort"], token);
                 using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(folder, "export-report.json"), token));
                 string blend = report.RootElement.GetProperty("exported")[0].GetProperty("file").GetString()!;
                 string pending = Path.Combine(folder, "pending.glb");
@@ -1360,9 +1856,9 @@ internal sealed class MainForm : Form
             // initializes the per-user browser cache.  Do not report a healthy
             // generated model as broken after the old 30-second cutoff.
             await preview.Loaded.Task.WaitAsync(TimeSpan.FromMinutes(2), token);
-            status.Text = "Source name: " + clip.Name + " · " + clip.Set + " · Preview: " + selectedCharacter.Label + " · Mouse drag: orbit, wheel: zoom";
+            status.Text = "Source name: " + clip.Name + " · " + clip.Set + " · Preview: " + selectedCharacter.Label + (exactMotion ? " · exact motion" : " · neutral/partial motion (decoder work remains)") + " · Mouse drag: orbit, wheel: zoom";
         } catch (OperationCanceledException) { }
-        catch (TimeoutException) { if (version == previewVersion && !IsDisposed) preview.Notice("Preview is still loading. Try selecting the clip again if the character does not appear."); }
+        catch (TimeoutException) { if (version == previewVersion && !IsDisposed) { preview.KeepBrowserVisibleNotice("Preview is still loading. The viewer remains active; select the clip again to retry."); status.Text = "Preview timed out waiting for the viewer; the generated model is still available."; } }
         catch (Exception ex) { if (version == previewVersion && !IsDisposed) preview.Notice("Cannot preview this clip on " + selectedCharacter.Label + ".\n" + ex.Message[..Math.Min(ex.Message.Length, 600)]); }
         finally { if (ReferenceEquals(previewOperation, cancellation)) previewOperation = null; }
     }
@@ -1373,8 +1869,61 @@ internal sealed class MainForm : Form
         string key = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(asset.ArchivePath + "|" + asset.InternalPath + "|" + asset.EntryIndex + "|" + asset.Size)));
         string resource = Path.Combine(cache, key + ".wft"), geometry = Path.Combine(cache, key + ".geometry.json");
         if (!File.Exists(resource)) await File.WriteAllBytesAsync(resource, GameLibrary.Extract(asset, archiveNames), token);
-        if (!File.Exists(geometry)) await Python("wft_geometry_inspector.py", [resource, "--output", geometry], token);
+        bool geometryNeedsRefresh = !File.Exists(geometry);
+        if (!geometryNeedsRefresh)
+        {
+            try
+            {
+                geometryNeedsRefresh = !File.ReadAllText(geometry)
+                    .Contains("wft-geometry.v2", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                geometryNeedsRefresh = true;
+            }
+        }
+        if (geometryNeedsRefresh)
+            await Python("wft_geometry_inspector.py", [resource, "--output", geometry], token);
+        // Native WTD dictionaries are paired by stem when available. Extract
+        // their DDS payloads as evidence now; shader-name/material mapping is
+        // intentionally kept explicit until the dictionary layout is validated.
+        if (gameLibrary is not null)
+        {
+            var dictionaries = FindCharacterTextureDictionaries(asset);
+            if (dictionaries.Count > 0)
+            {
+                string textureDir = Path.Combine(cache, key + "-textures");
+                foreach (GameAsset dictionary in dictionaries)
+                {
+                    string stem = Path.GetFileNameWithoutExtension(dictionary.Name).ToLowerInvariant();
+                    string wtd = Path.Combine(cache, key + "-" + stem + ".wtd");
+                    string textureReport = Path.Combine(cache, key + "-" + stem + ".wtd.json");
+                    // v0.45 changed WTD extraction from linear payload copying to
+                    // Xbox tiled-DXT untile/endian correction. Rebuild older caches
+                    // automatically instead of reusing their corrupted DDS files.
+                    bool cacheNeedsDecoderRefresh = !File.Exists(textureReport) ||
+                        !File.ReadAllText(textureReport).Contains("rdr1LinearPayload", StringComparison.OrdinalIgnoreCase);
+                    if (cacheNeedsDecoderRefresh)
+                    {
+                        if (!File.Exists(wtd)) await File.WriteAllBytesAsync(wtd, GameLibrary.Extract(dictionary, archiveNames), token);
+                        await Python("wtd_texture_inspector.py", [wtd, "--output", textureReport, "--extract-dir", textureDir], token);
+                    }
+                }
+                string mappingReport = Path.Combine(cache, key + ".wft-wtd-material-map.json");
+                if (!File.Exists(mappingReport))
+                    await Python("wft_wtd_material_map.py", [geometry, Path.Combine(cache, key + "-" + Path.GetFileNameWithoutExtension(dictionaries[0].Name).ToLowerInvariant() + ".wtd.json"), "--output", mappingReport], token);
+            }
+        }
         return geometry;
+    }
+    private async Task EnsureNativeCharacterAsync(CancellationToken token)
+    {
+        if (SelectedCharacter.Asset is not null || !Directory.Exists(DefaultGamePath)) return;
+        status.Text = "Loading native RDR1 character assets…";
+        string bundled = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt");
+        archiveNames = File.Exists(bundled) ? Rpf6Archive.LoadNames(bundled) : [];
+        gameLibrary ??= await GameLibrary.ScanAsync(DefaultGamePath, archiveNames, new Progress<string>(s => status.Text = s), token);
+        SetCharacters(gameLibrary.Characters);
     }
     private async Task ImportAsync() {
         if (busy) return;
@@ -1447,6 +1996,43 @@ internal sealed class MainForm : Form
             pythonDependencyFallback[executable] = needs;
             return needs;
         }
+    }
+    private List<GameAsset> FindCharacterTextureDictionaries(GameAsset asset)
+    {
+        if (gameLibrary is null) return [];
+        var dictionaries = gameLibrary.Characters.Where(candidate => candidate.Name.EndsWith(".wtd", StringComparison.OrdinalIgnoreCase)).ToList();
+        string stem = Path.GetFileNameWithoutExtension(asset.Name).ToLowerInvariant();
+        // RDR1 stores player meshes in fragments.rpf but their texture
+        // dictionaries in mapres.rpf under the public outfit names.
+        string? outfit = stem switch
+        {
+            "player_jack_default" or "player_jack_defaultmp" => "john_out_cowboy",
+            "player_jack_elegantsuit" => "john_out_suit",
+            "player_jack_oldduster" or "player_jack_duster" => "john_out_duster",
+            "player_jack_oldponcho" => "john_out_poncho",
+            "player_jack_bandito" => "john_out_bandito",
+            "player_jack_cattlerustler" => "john_out_rustler",
+            "player_jack_mountainman" => "john_out_mountainman",
+            "player_jack_rancher" => "john_out_rancher",
+            "player_jack_legend" => "john_out_legend",
+            "player_jack_fbi" => "john_out_fbi",
+            "player_jack_uslaw" => "john_out_uslaw",
+            "player_jack_treasurehunter" => "john_out_treasur",
+            "player_jack_mexicanrebel" => "john_out_rebel",
+            _ => null
+        };
+        var result = new List<GameAsset>();
+        GameAsset? outfitDictionary = outfit is null ? dictionaries.FirstOrDefault(candidate =>
+            string.Equals(Path.GetFileNameWithoutExtension(candidate.Name), stem, StringComparison.OrdinalIgnoreCase))
+            : dictionaries.FirstOrDefault(candidate => string.Equals(Path.GetFileNameWithoutExtension(candidate.Name), outfit, StringComparison.OrdinalIgnoreCase));
+        if (outfitDictionary is not null) result.Add(outfitDictionary);
+        string style = stem.StartsWith("player_jack_", StringComparison.OrdinalIgnoreCase) ? stem[12..] : "default";
+        foreach (string shared in new[] { $"smic_player_{style}_1", "smic_player_default_1", "smic_player_default_hand_1", "smic_player_default_im_texture" })
+        {
+            GameAsset? match = dictionaries.FirstOrDefault(candidate => string.Equals(Path.GetFileNameWithoutExtension(candidate.Name), shared, StringComparison.OrdinalIgnoreCase));
+            if (match is not null && !result.Any(existing => existing.InternalPath.Equals(match.InternalPath, StringComparison.OrdinalIgnoreCase))) result.Add(match);
+        }
+        return result;
     }
     private static string SummarizeProcessFailure(string error, string output)
     {

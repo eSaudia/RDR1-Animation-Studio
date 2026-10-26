@@ -57,7 +57,11 @@ def merge(document: dict[str, Any], geometry_document: dict[str, Any],
         key = tuple(name.lower() for name in names)
         if key in material_indices:
             return material_indices[key]
-        diffuse = add_texture(names[0]) if names else None
+        # The first shader slot in RDR1 is often the alpha-cutout mask, not the
+        # color atlas.  Prefer the matching cowboy color atlas when it is
+        # available, while retaining the source slot names in extras.
+        diffuse_name = next((n for n in names if "cowboy" in n.lower() or "out_" in n.lower()), "john_out_cowboy.png" if "john_out_cowboy" in available else (names[0] if names else ""))
+        diffuse = add_texture(diffuse_name) if diffuse_name else None
         # RDR1 commonly stores normals as packed ATI2 data. The current PNG conversion
         # does not reconstruct standard RGB tangent normals, so linking it directly produces
         # black, faceted Blender shading. Keep the source name in extras and make this opt-in.
@@ -95,9 +99,10 @@ def merge(document: dict[str, Any], geometry_document: dict[str, Any],
             attributes["NORMAL"] = builder.add((v for row in geometry["normals"] for v in row), 5126, "VEC3",
                                                vertex_count, target=34962)
         if len(geometry["texcoords"]) == vertex_count:
-            # glTF uses an upper-left UV origin relative to the decoded game convention.
+            # Keep the decoded WFT UV orientation. Blender's glTF importer and the
+            # embedded RDR1 atlas use the same convention for this export path.
             attributes["TEXCOORD_0"] = builder.add(
-                (v for uv in geometry["texcoords"] for v in (uv[0], 1.0-uv[1])), 5126, "VEC2",
+                (v for uv in geometry["texcoords"] for v in (uv[0], uv[1])), 5126, "VEC2",
                 vertex_count, target=34962)
         if vertex_colors and len(geometry.get("colors", [])) == vertex_count:
             attributes["COLOR_0"] = builder.add(

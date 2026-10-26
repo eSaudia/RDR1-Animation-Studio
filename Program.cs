@@ -1,6 +1,7 @@
 namespace RDR1AnimationStudio;
 
 using System.Diagnostics;
+using System.Text.Json;
 using RDR1AnimationStudio.Core;
 
 internal static class Program
@@ -79,6 +80,14 @@ internal static class Program
             Console.WriteLine("first-files:");
             foreach (Rpf6Archive.Entry entry in files.Take(20))
                 Console.WriteLine($"  index={entry.Index} {entry.Path}|{entry.Size}|resource=0x{entry.ResourceType:X2}|offset=0x{entry.DataOffset:X}");
+            return;
+        }
+        if (args.Length >= 2 && args[0] == "--list-rpf")
+        {
+            Dictionary<uint, string>? names = args.Length >= 3 ? Rpf6Archive.LoadNames(args[2]) : null;
+            using Rpf6Archive archive = Rpf6Archive.Open(args[1], names);
+            foreach (Rpf6Archive.Entry entry in archive.Entries.Where(e => !e.IsDirectory))
+                Console.WriteLine($"index={entry.Index}|{entry.Path}|{entry.Size}|resource=0x{entry.ResourceType:X2}|offset=0x{entry.DataOffset:X}");
             return;
         }
         if (args.Length >= 2 && args[0] == "--decode-resource")
@@ -179,6 +188,15 @@ internal static class Program
                 File.WriteAllBytes(args[3], GameLibrary.Extract(match, names));
                 Console.WriteLine($"extracted={match.Name}|{args[3]}");
             }
+            return;
+        }
+        if (args.Length >= 4 && args[0] == "--extract-world-cell")
+        {
+            string bundledNames = Path.Combine(AppContext.BaseDirectory, "Assets", "ImportedFileNames.txt");
+            Dictionary<uint, string> names = File.Exists(bundledNames) ? Rpf6Archive.LoadNames(bundledNames) : [];
+            GameLibrary library = GameLibrary.ScanAsync(args[1], names).GetAwaiter().GetResult();
+            string manifest = WorldCellPackage.Write(library, names, args[2], args[3]);
+            Console.WriteLine($"manifest={manifest}|files={JsonDocument.Parse(File.ReadAllText(manifest)).RootElement.GetProperty("counts").GetProperty("total").GetInt32()}|errors={library.Errors.Count}");
             return;
         }
         ApplicationConfiguration.Initialize();

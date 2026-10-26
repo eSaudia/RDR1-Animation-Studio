@@ -177,7 +177,7 @@ internal sealed class GameLibrary
             string path = CachePath(root);
             if (!File.Exists(path)) return new(StringComparer.OrdinalIgnoreCase);
             ScanCache? cache = JsonSerializer.Deserialize<ScanCache>(File.ReadAllText(path));
-            if (cache is null || cache.Version != 1 || !string.Equals(cache.Root, root, StringComparison.OrdinalIgnoreCase) || cache.NameCount != nameCount)
+            if (cache is null || cache.Version != 2 || !string.Equals(cache.Root, root, StringComparison.OrdinalIgnoreCase) || cache.NameCount != nameCount)
                 return new(StringComparer.OrdinalIgnoreCase);
             return cache.Archives.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
         }
@@ -191,7 +191,7 @@ internal sealed class GameLibrary
             string path = CachePath(root);
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
             string temp = path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(new ScanCache(1, root, nameCount, archives.OrderBy(a => a.Path, StringComparer.OrdinalIgnoreCase).ToList())));
+            File.WriteAllText(temp, JsonSerializer.Serialize(new ScanCache(2, root, nameCount, archives.OrderBy(a => a.Path, StringComparer.OrdinalIgnoreCase).ToList())));
             File.Move(temp, path, true);
         }
         catch { /* A cache must never make game scanning fail. */ }
@@ -216,11 +216,14 @@ internal sealed class GameLibrary
         string extension = Path.GetExtension(name).ToLowerInvariant();
         GameAssetKind? byExtension = extension switch {
             ".was" => GameAssetKind.AnimationSet,
-            // WFT is the skinned fragment model. WPDT/WFD companions are not independently previewable.
-            ".wft" => GameAssetKind.Character,
+            // WFT is the skinned fragment model. WFD/WTD are native drawable and
+            // texture companions; keep them visible so the studio can extract
+            // and inspect them without requiring CodeX.
+            ".wft" or ".wfd" => GameAssetKind.Character,
+            ".wtd" => GameAssetKind.Character,
             ".xsc" or ".csc" or ".ysc" or ".scr" => GameAssetKind.MissionScript,
             ".awc" or ".rel" or ".xma" or ".xwb" or ".wav" => GameAssetKind.Audio,
-            ".wdr" or ".wbn" or ".wbd" or ".wpl" or ".ymap" or ".ydr" or ".ybn" => GameAssetKind.Prop,
+            ".wdr" or ".wbn" or ".wbd" or ".wvd" or ".wpl" or ".ymap" or ".ydr" or ".ybn" => GameAssetKind.Prop,
             ".nav" or ".ait" or ".ai" => GameAssetKind.AiData,
             ".cam" or ".cut" or ".cin" => GameAssetKind.Camera,
             _ => null

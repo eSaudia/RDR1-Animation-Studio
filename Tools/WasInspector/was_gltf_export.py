@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import json
 import math
 import struct
@@ -94,6 +95,51 @@ def fit_samples(samples: list[list[float]], frame_count: int) -> list[list[float
             for frame in range(frame_count)]
 
 
+def select_bound_tracks(source: dict[str, Any], *, root_tracks: bool = True) -> dict[tuple[int, str], dict[str, Any]]:
+    """Collect channels across one or more adjacent compressed sequences."""
+    # Older JSON documents omitted the entry kind because they could only
+    # contain one sequence; retain compatibility with those documents.
+    entries = [entry for entry in source.get("entries", [])
+               if entry.get("kind", "compressed_sequence") == "compressed_sequence"]
+    target_frames = int(source["animation"]["frame_count"])
+    raw_frames = sum(int(entry.get("frame_count", 0)) for entry in entries)
+    overlap = raw_frames - target_frames
+    candidates: dict[tuple[int, str, bool], dict[str, Any]] = {}
+    for entry_index, entry in enumerate(entries):
+        for channel in entry.get("channels", []):
+            track = channel.get("assembled_track") or {}
+            binding = channel.get("skeleton_binding")
+            if not binding or track.get("status") != "decoded":
+                continue
+            kind = channel["track_kind_name"]
+            # Scalar facial controls require morph targets/face bones. Keep
+            # them in the decoded document, but do not mis-export them as a
+            # four-component rotation on a skeleton-only glTF.
+            if kind == "scalar_track":
+                continue
+            is_root = kind.startswith("root_")
+            path = "translation" if "vector" in kind else "rotation"
+            candidate_key = (binding["index"], path, is_root)
+            item = candidates.get(candidate_key)
+            if item is None:
+                item = copy.deepcopy(channel)
+                item["assembled_track"]["samples"] = []
+                candidates[candidate_key] = item
+            samples = track["samples"]
+            if overlap == len(entries) - 1 and entry_index:
+                samples = samples[1:]
+            item["assembled_track"]["samples"].extend(samples)
+    selected: dict[tuple[int, str], dict[str, Any]] = {}
+    for (node_index, path, is_root), channel in candidates.items():
+        key = (node_index, path)
+        current = selected.get(key)
+        # Root-motion tracks are preferred only when they compete for the
+        # same skeleton node/path; ordinary bone tracks must still be kept.
+        if current is None or (root_tracks and is_root) or (not root_tracks and not is_root):
+            selected[key] = channel
+    return selected
+
+
 def export_gltf(source: dict[str, Any], *, root_tracks: bool = True) -> dict[str, Any]:
     skeleton = source["skeleton"]
     bones = sorted(skeleton["bones"], key=lambda bone: bone["index"])
@@ -149,19 +195,7 @@ def export_gltf(source: dict[str, Any], *, root_tracks: bool = True) -> dict[str
     times = [frame / fps for frame in range(frame_count)]
     time_accessor = builder.add(times, 5126, "SCALAR", frame_count, bounds=True)
 
-    selected: dict[tuple[int, str], dict[str, Any]] = {}
-    for entry in source.get("entries", []):
-        for channel in entry.get("channels", []):
-            track = channel.get("assembled_track") or {}
-            binding = channel.get("skeleton_binding")
-            if not binding or track.get("status") != "decoded":
-                continue
-            kind = channel["track_kind_name"]
-            path = "translation" if "vector" in kind else "rotation"
-            key = (binding["index"], path)
-            is_root = kind.startswith("root_")
-            if key not in selected or (root_tracks and is_root) or (not root_tracks and not is_root):
-                selected[key] = channel
+    selected = select_bound_tracks(source, root_tracks=root_tracks)
 
     for (node_index, path), channel in sorted(selected.items()):
         samples = fit_samples(channel["assembled_track"]["samples"], frame_count)
@@ -195,19 +229,7 @@ def append_animation(document: dict[str, Any], builder: BufferBuilder,
     fps = float(source["animation"]["frames_per_second"])
     times = [frame / fps for frame in range(frame_count)]
     time_accessor = builder.add(times, 5126, "SCALAR", frame_count, bounds=True)
-    selected: dict[tuple[int, str], dict[str, Any]] = {}
-    for entry in source.get("entries", []):
-        for channel in entry.get("channels", []):
-            track = channel.get("assembled_track") or {}
-            binding = channel.get("skeleton_binding")
-            if not binding or track.get("status") != "decoded":
-                continue
-            kind = channel["track_kind_name"]
-            path = "translation" if "vector" in kind else "rotation"
-            key = (binding["index"], path)
-            is_root = kind.startswith("root_")
-            if key not in selected or (root_tracks and is_root) or (not root_tracks and not is_root):
-                selected[key] = channel
+    selected = select_bound_tracks(source, root_tracks=root_tracks)
     for (node_index, path), channel in sorted(selected.items()):
         samples = fit_samples(channel["assembled_track"]["samples"], frame_count)
         if path == "rotation":

@@ -39,7 +39,8 @@ def assemble_track_samples(
     track_kind_name: str, payloads: list[dict[str, Any]], frame_count: int
 ) -> dict[str, Any]:
     quaternion = track_kind_name in ("quaternion_track", "root_quaternion_track")
-    vector = track_kind_name in ("vector_track", "root_vector_track")
+    vector = track_kind_name in ("vector_track", "root_vector_track", "unknown_vector_track")
+    scalar = track_kind_name == "scalar_track"
     samples: list[list[float]]
 
     if quaternion and len(payloads) == 1 and payloads[0]["class"] == "constant_quaternion":
@@ -63,6 +64,8 @@ def assemble_track_samples(
     elif vector and len(payloads) == 3:
         curves = [expand_scalar(payload["values"], frame_count) for payload in payloads]
         samples = [[curve[frame] for curve in curves] for frame in range(frame_count)]
+    elif scalar and len(payloads) == 1:
+        samples = [[value] for value in expand_scalar(payloads[0]["values"], frame_count)]
     else:
         return {"status": "unsupported_layout"}
 
@@ -79,7 +82,7 @@ def assemble_track_samples(
 
     result: dict[str, Any] = {
         "status": "decoded",
-        "format": "xyzw" if quaternion else "xyz",
+        "format": "xyzw" if quaternion else "xyz" if vector else "scalar",
         "sample_count": len(samples),
         "samples": samples,
     }
@@ -145,12 +148,19 @@ def export_animation(path: pathlib.Path, query: str, sample_limit: int = 120,
     unresolved_payloads = 0
     assembled_tracks = 0
     unassembled_tracks = 0
+    static_entries: list[dict[str, Any]] = []
+    sequence_entries: list[dict[str, Any]] = []
 
-    for target in was_inspector.scan_padded_pointer_table(decoded, record["track_data_offset"]):
+    targets = was_inspector.scan_padded_pointer_table(decoded, record["track_data_offset"])
+    if not targets:
+        targets = was_inspector.scan_pointer_array(
+            decoded, record["track_data_offset"], record.get("track_array_count", 0)
+        )
+    for target in targets:
         sequence = was_inspector.parse_compressed_sequence(decoded, target)
         if sequence is None:
             signature = struct.unpack_from("<I", decoded, target)[0]
-            entries.append(
+            static_entries.append(
                 {
                     "kind": "static_or_special_object",
                     "offset_hex": f"0x{target:X}",
@@ -206,7 +216,7 @@ def export_animation(path: pathlib.Path, query: str, sample_limit: int = 120,
                     "payloads": payloads,
                 }
             )
-        entries.append(
+        sequence_entries.append(
             {
                 "kind": "compressed_sequence",
                 "offset_hex": sequence["offset_hex"],
@@ -215,6 +225,18 @@ def export_animation(path: pathlib.Path, query: str, sample_limit: int = 120,
                 "channels": channels,
             }
         )
+
+    # A padded scan can also encounter an adjacent alternate sequence.  The
+    # record header identifies the exact clip length; prefer the sequence that
+    # matches it before treating the pointers as a multi-block clip.
+    exact = [entry for entry in sequence_entries
+             if entry.get("frame_count") == record["frame_count"]]
+    entries.extend(exact[:1] if exact else sequence_entries)
+
+    # Some arrays include a static companion object next to the real motion
+    # sequence. It is not a channel; retain it only for truly static records.
+    if not entries:
+        entries.extend(static_entries)
 
     return {
         "schema": "rdr1-animation-studio.was-animation-export.v2",

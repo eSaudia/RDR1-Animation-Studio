@@ -15,11 +15,21 @@ import json
 import os
 import re
 import struct
+import sys
 import zlib
 from pathlib import Path
 from typing import Any
 
 from rsc85_crypto import decrypt_payload
+
+# Keep the project's bundled, offline dependencies available when this helper
+# is launched directly or by the desktop app.  The decoder must not require a
+# machine-wide Python package install just to expand an RSC85 payload.
+_LOCAL_DEPS = Path(__file__).resolve().parent / "_deps"
+if _LOCAL_DEPS.is_dir():
+    _dependency_path = str(_LOCAL_DEPS)
+    if _dependency_path not in sys.path:
+        sys.path.insert(0, _dependency_path)
 
 try:
     import zstandard  # optional, needed for camera.rpf entries

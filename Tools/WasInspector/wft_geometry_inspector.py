@@ -42,7 +42,10 @@ def dec3n(value: int) -> list[float]:
 
 
 def half_be(data: bytes) -> float:
-    return struct.unpack(">e", data)[0]
+    # RDR1 PC WFT vertex streams store half-float UVs little-endian.
+    # Reading these as big-endian produces enormous UVs and severe texture
+    # speckling in Blender.
+    return struct.unpack("<e", data)[0]
 
 
 def read_cstring(reader: Reader, pointer: int) -> str:
@@ -193,7 +196,7 @@ def inspect(data: bytes) -> dict[str, Any]:
             "colors": colors, "tangents": tangents,
             "blend_weights": weights, "blend_indices": joints, "indices": indices,
         })
-    return {"schema": "rdr1-animation-studio.wft-geometry.v1", "geometry_count": len(geometries), "geometries": geometries}
+    return {"schema": "rdr1-animation-studio.wft-geometry.v2", "geometry_count": len(geometries), "geometries": geometries}
 
 
 def main() -> int:

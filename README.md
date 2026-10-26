@@ -9,6 +9,15 @@ Red Dead Redemption animation archives and preparing them for Blender. It is a
 research and modding tool: it does not include Rockstar game files and it never
 writes to your RPF archives automatically.
 
+### v0.28 preview reliability
+
+The game-folder picker opens at the standard Steam installation path when it is
+present: `D:\\Program Files (x86)\\Steam\\steamapps\\common\\Red Dead Redemption\\game`.
+The in-app WebView2 animation preview now retries the model-transfer handshake,
+reports transport errors, and invalidates stale failed preview caches. This is
+separate from the decoder: supported WAS clips are converted to a cached GLB,
+then played in the embedded viewer.
+
 ## See it in action
 
 The application indexes real WAS clip records, keeps their source identity, and
@@ -36,6 +45,38 @@ demo below shows the exported animation workflow and playback timing.
 - Provide a dark/light theme and a report when a clip layout is unsupported.
 - Create custom Blender authoring scenes, including a Spider leap demo preset.
 - Package selected supported clips into a portable, deduplicated animation pack with a validated manifest.
+- Extract a reproducible v0.27 world-cell evidence package for one mission, including the full Armadillo WBD/WVD/WSI territory set, hashes, bounded collision geometry, validated visual mesh evidence, pointer-validated placement transforms, and a Blender scene assembled from matched meshes.
+
+### World-cell evidence (v0.27)
+
+Scenes → **Extract world-cell evidence…** writes the selected mission, its
+camera/audio/animation companions, and the named Armadillo blacksmith candidate
+cell into a separate folder. The output is deliberately an evidence package,
+not a claim that the original world has already been reconstructed: the mission
+world-cell reference, room/material ownership, collision/nav data, and
+camera-parent coordinates remain listed as unresolved in
+`world-cell.manifest.json`. WBD reports decode pointer-valid bounds, quantized
+collision vertices, and triangle records. WVD reports follow validated
+drawable → LOD → model → geometry → vertex/index-buffer chains, decode FVF
+vertex declarations, positions, indexed triangles, and mesh bounds. The package
+also extracts and decodes the companion `armadillo.wsi`: 48 sector headers and
+416 drawable-instance blocks with validated hashes, names, bounds, and RDR-to-
+tool-axis placement matrices. `placement-join.json` joins those transforms to
+WVD drawable candidates by exact 32-bit hash only. Shader/material bindings,
+room/portal relationships, streamed-cell ownership, and mission-to-cell
+identity remain explicitly unresolved. The package now includes every WBD/WVD
+resource under `root/armadillo/` in the selected territory archive, rather than
+only the blacksmith candidates. This gives the placement join the complete
+visual-dictionary hash set available in that archive.
+
+Scenes → **Build placed world-cell Blender scene…** reads the package's
+`placement-join.json`, creates shared Blender meshes from decoded WVD vertex and
+index buffers, and instantiates them with the validated WSI matrices. The scene
+also includes unmatched-instance evidence markers, a presentation floor, a
+camera, and neutral materials explicitly labelled as placeholders. It is a
+real placed-geometry preview, not yet a game-faithful renderer: terrain,
+textures/shaders, room streaming, mission ownership, audio, and AI remain
+unresolved.
 
 ## Library
 
@@ -116,6 +157,14 @@ source-order scrubbing and playback. The viewer does not turn byte offsets into
 invented game seconds: labels marked as lexical candidates remain evidence until
 the binary event/camera payload is independently validated.
 
+**Export selected resource scene…** extracts the selected camera/mission resource,
+runs the verified semantic decoder, and passes any decoded camera-shot positions,
+targets, durations, and lens values into a Blender scene. The bundled RDR1
+character geometry/materials and looping motion are used for the visual stage;
+the selected resource name and source path are recorded in the Blender manifest.
+If no camera shot records are decoded, the file says so and uses a labeled
+presentation fallback instead of pretending it is the game's world.
+
 The lower scene controls can open any exported `.blend` in Blender's camera view and
 start its timeline automatically. **Render selected/current to MP4…** first checks
 whether exactly one supported animation is selected in Library. If so, it builds a
@@ -123,7 +172,30 @@ temporary camera-and-light scene around that exact clip, renders it at the clip'
 frame range/FPS, and removes the temporary `.blend`; only the destination MP4 is
 requested. Otherwise it renders the last scene created or opened in this session. If
 neither exists, the app can render the procedural demo directly without asking for a
-Blender file. Mission cameras, props, AI tasks, and audio remain future decoded inputs.
+Blender file. Mission world props, AI tasks, audio, and unresolved camera payloads
+remain evidence-only until their binary formats are independently decoded.
+
+### Original-audio mission showcase (first vertical slice)
+
+The Scenes footer also exposes **Build original-audio mission showcase…** for
+`dlc_find_blunderbuss.wsc`. This is the first end-to-end mission slice rather
+than a generic sample: it uses the decoded `gent_nor_hnd_knl_bbuss` John motion,
+the bundled interaction definition, and the game's `blunderbuss.awc` bank.
+The four embedded RIFF/WAVE members are extracted byte-for-byte; their manifest
+records the Microsoft ADPCM format tag, sample rate, block alignment, and source
+offset. Blender/FFmpeg then carries the original member audio into the MP4.
+
+The generated `.manifest.json` intentionally marks the workshop geometry as a
+presentation proxy. RDR1's streamed world placement, collision/terrain, mission
+prop transforms, and runtime camera payload are not decoded by this slice, so the
+app does not claim that the proxy is the original game map. The resulting scene
+and movie are still useful as a reproducible proof that real animation + real
+game audio + a renderable cinematic pipeline are connected.
+
+Animation preview uses exact motion when the selected clip validates. For clips
+with incomplete decoder coverage or a different skeleton, the preview path now
+offers a neutral/partial best-effort Blender model and labels it as such; exact
+game motion is never silently substituted.
 
 ### Faster repeat scans
 

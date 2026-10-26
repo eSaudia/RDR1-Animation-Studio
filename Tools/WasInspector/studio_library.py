@@ -15,29 +15,39 @@ import was_skeleton_bind as skeleton
 
 def validate_motion(document):
     entries = document['entries']
-    if len(entries) != 1 or entries[0]['kind'] != 'compressed_sequence':
+    if not entries or any(entry.get('kind') != 'compressed_sequence' for entry in entries):
         raise ValueError('Unresolved sequence layout; exact export unavailable')
-    entry = entries[0]
-    if entry['frame_count'] != document['animation']['frame_count']:
+    frame_count = int(document['animation']['frame_count'])
+    raw_frames = sum(int(entry.get('frame_count', 0)) for entry in entries)
+    overlap = raw_frames - frame_count
+    if overlap not in (0, len(entries) - 1):
         raise ValueError('Sequence timing differs from clip timing; export blocked')
-    keys = set()
-    tracks = []
-    for channel in entry['channels']:
-        track = channel['assembled_track']
-        if track.get('status') != 'decoded' or track.get('samples_truncated', 0):
-            raise ValueError('Contains an undecoded or incomplete track')
-        key = (channel['bone_id'], channel['track_kind'])
-        if key in keys:
-            raise ValueError('Ambiguous repeated bone track')
-        keys.add(key)
-        samples = track['samples']
-        if len(samples) != entry['frame_count']:
-            raise ValueError('Incomplete frame samples')
-        tracks.append((key, samples))
+    by_key = {}
+    for entry_index, entry in enumerate(entries):
+        seen = set()
+        for channel in entry['channels']:
+            track = channel['assembled_track']
+            if track.get('status') != 'decoded' or track.get('samples_truncated', 0):
+                raise ValueError('Contains an undecoded or incomplete track')
+            key = (channel['bone_id'], channel['track_kind'])
+            if key in seen:
+                raise ValueError('Ambiguous repeated bone track')
+            seen.add(key)
+            samples = track['samples']
+            if len(samples) != entry['frame_count']:
+                raise ValueError('Incomplete frame samples')
+            # Adjacent compressed blocks in the game share their boundary
+            # frame.  Remove that duplicate only when the header proves it.
+            if overlap == len(entries) - 1 and entry_index:
+                samples = samples[1:]
+            by_key.setdefault(key, []).extend(samples)
+    tracks = list(by_key.items())
+    if any(len(samples) != frame_count for _, samples in tracks):
+        raise ValueError('Incomplete frame samples')
     if not tracks:
         raise ValueError('No motion tracks')
     digest = hashlib.sha256()
-    digest.update(struct.pack('<Id', document['animation']['frame_count'], document['animation']['frames_per_second']))
+    digest.update(struct.pack('<Id', frame_count, document['animation']['frames_per_second']))
     for (bone, kind), samples in sorted(tracks):
         digest.update(struct.pack('<II', bone, kind))
         for values in samples:
@@ -77,36 +87,86 @@ def build_catalog(manifest, output):
     output.write_text(json.dumps({'Clips': rows, 'Errors': errors}, indent=2), encoding='utf-8')
 
 
-def export_library(rows, output, blender, skeleton_path, base_blend=None):
+def _placeholder_document(row):
+    """Create a truthful neutral-pose document for best-effort preview only."""
+    return {
+        "schema": "rdr1-animation-studio.best-effort-preview.v1",
+        "animation": {
+            "name": row.get("Name", "unresolved"),
+            "source_path": row.get("Set", ""),
+            "frame_count": int(row.get("Frames", 1) or 1),
+            "duration_seconds": float(row.get("Duration", 0) or 0),
+            "frames_per_second": float(row.get("Fps", 30) or 30),
+            "sample_period_seconds": 1.0 / float(row.get("Fps", 30) or 30),
+            "vector_order": "xyz",
+            "quaternion_order": "xyzw",
+        },
+        "coverage": {"status": "unresolved", "reason": row.get("Status", "decoder unavailable")},
+        "entries": [],
+    }
+
+
+def export_library(rows, output, blender, skeleton_path, base_blend=None, best_effort=False):
     model, bones = skeleton.load_skeleton(skeleton_path)
     output.mkdir(parents=True, exist_ok=True)
-    report = {'exported': [], 'failed': [], 'identical_motion_aliases': []}
+    report = {'exported': [], 'failed': [], 'identical_motion_aliases': [], 'approximate': []}
     seen_motion = {}
     groups = collections.defaultdict(list)
     for row in rows:
         groups[row['Source']].append(row)
     for source, selected in groups.items():
         try:
-            data, records = batch.catalog(pathlib.Path(source))
+            try:
+                data, records = batch.catalog(pathlib.Path(source))
+            except (OSError, ValueError, RuntimeError, struct.error):
+                if not best_effort:
+                    raise
+                data, records = b"", []
             # Bounded Blender files keep large whole-game exports usable.
             for start in range(0, len(selected), 50):
                 bound, identities = [], []
                 for row in selected[start:start+50]:
+                    approximate = False
                     try:
-                        doc = animation.export_animation(pathlib.Path(source), row['Name'], 0, data, records, row['Offset'])
-                        fingerprint = validate_motion(doc)
+                        try:
+                            doc = animation.export_animation(pathlib.Path(source), row['Name'], 0, data, records, row['Offset'])
+                        except (ValueError, RuntimeError, KeyError, struct.error):
+                            if not best_effort:
+                                raise
+                            doc = _placeholder_document(row)
+                            approximate = True
+                        try:
+                            fingerprint = validate_motion(doc)
+                        except (ValueError, RuntimeError, KeyError, struct.error):
+                            if not best_effort:
+                                raise
+                            fingerprint = f"best-effort:{source}:{row['Offset']}"
+                            approximate = True
                         if row.get('Fingerprint') and fingerprint != row['Fingerprint']:
-                            raise ValueError('Source motion changed since indexing. Rescan first.')
+                            if not best_effort:
+                                raise ValueError('Source motion changed since indexing. Rescan first.')
+                            approximate = True
                         if fingerprint in seen_motion:
                             report['identical_motion_aliases'].append({'clip':row,'same_as':seen_motion[fingerprint]})
                             continue
                         item = skeleton.bind(doc, model, bones)
-                        if not item['binding_coverage']['complete']:
-                            raise ValueError('Selected skeleton cannot bind every track')
+                        coverage = item['binding_coverage']
+                        # A WAS set can legitimately target a related rig (for
+                        # example a prop/animal or a cinematic variant) while
+                        # still sharing useful human tracks.  Keep every
+                        # matched channel so the preview/export remains useful;
+                        # unmatched channels are reported in binding_coverage
+                        # instead of rejecting the entire clip.
+                        if not coverage['matched_bone_ids'] and not best_effort:
+                            raise ValueError('Selected skeleton has no matching animation bones')
+                        if not coverage['matched_bone_ids']:
+                            approximate = True
                         item['animation']['name'] = row['Name'][:40] + '__' + format(row['Offset'], 'x')
                         bound.append(item)
                         identities.append(row)
                         seen_motion[fingerprint] = row
+                        if approximate:
+                            report['approximate'].append({'clip': row, 'reason': 'neutral or partial preview; exact decoder/bone binding unavailable'})
                     except (ValueError, RuntimeError, KeyError) as exc:
                         report['failed'].append({'clip': row, 'error': str(exc)})
                 if not bound:
@@ -144,12 +204,13 @@ def main():
     parser.add_argument('--blender', type=pathlib.Path)
     parser.add_argument('--skeleton', type=pathlib.Path)
     parser.add_argument('--base-blend', type=pathlib.Path)
+    parser.add_argument('--best-effort', action='store_true', help='Create neutral/partial Blender previews when exact motion decoding or skeleton binding is unavailable.')
     args = parser.parse_args()
     rows = json.loads(args.manifest.read_text(encoding='utf-8-sig'))
     if args.mode == 'index':
         build_catalog(rows, args.output)
     else:
-        export_library(rows, args.output, args.blender, args.skeleton, args.base_blend)
+        export_library(rows, args.output, args.blender, args.skeleton, args.base_blend, args.best_effort)
 
 
 if __name__ == '__main__':
