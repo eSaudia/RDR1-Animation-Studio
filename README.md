@@ -9,6 +9,9 @@ Red Dead Redemption animation archives and preparing them for Blender. It is a
 research and modding tool: it does not include Rockstar game files and it never
 writes to your RPF archives automatically.
 
+The current development executable is available at
+[`releases/RDR1AnimationStudio.exe`](releases/RDR1AnimationStudio.exe).
+
 ### v0.28 preview reliability
 
 The game-folder picker opens at the standard Steam installation path when it is
