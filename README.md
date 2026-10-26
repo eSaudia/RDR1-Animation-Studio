@@ -23,7 +23,7 @@ then played in the embedded viewer.
 The application indexes real WAS clip records, keeps their source identity, and
 lets you export a single clip, a selection, or an entire animation set.
 
-![Animation Studio library](Assets/RDR1-Animation-Studio-v0.9.0.png)
+![Animation Studio library](Assets/RDR1-Animation-Studio-library.png)
 
 Exported actions can be opened in Blender on the bundled human skeleton. The
 demo below shows the exported animation workflow and playback timing.
@@ -31,6 +31,13 @@ demo below shows the exported animation workflow and playback timing.
 ![Animation export demo](Assets/RDR1-Animation-Studio-demo.gif)
 
 ![Blender character preview](Assets/RDR1-Animation-Studio-v0.5.0-jack-preview.png)
+
+The current build also includes a Blender-ready character preview and the
+texture/UV layout used by the exported model:
+
+![Blender exported character](Assets/Blender-exported-character.png)
+
+![Blender UV texture map](Assets/Blender-UV-texture-map.png)
 
 ## What it can do
 
